@@ -1,0 +1,41 @@
+{
+  "name": "intern-rotation-system",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "build:clean": "node -e \"const fs=require('fs');fs.rmSync('dist',{recursive:true,force:true});\" && vite build",
+    "tauri": "tauri",
+    "tauri:build": "tauri build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.28.0",
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-dialog": "^2.0.0",
+    "@tauri-apps/plugin-fs": "^2.0.0",
+    "clsx": "^2.1.0",
+    "framer-motion": "^11.0.0",
+    "lucide-react": "^0.350.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-hot-toast": "^2.4.1",
+    "react-router-dom": "^6.22.0",
+    "tailwind-merge": "^2.2.1",
+    "tailwindcss-animate": "^1.0.7",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "@types/react": "^18.2.64",
+    "@types/react-dom": "^18.2.21",
+    "@vitejs/plugin-react": "^4.2.1",
+    "autoprefixer": "^10.4.18",
+    "postcss": "^8.4.35",
+    "tailwindcss": "^3.4.1",
+    "typescript": "^5.4.2",
+    "vite": "^5.1.6"
+  }
+}

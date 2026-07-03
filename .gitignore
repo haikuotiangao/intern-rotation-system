@@ -1,0 +1,10 @@
+node_modules/
+dist/
+output/
+src-tauri/target/
+.claude/
+.scratch.py
+_fix_temp.py
+index.html
+.DS_Store
+*.pdb
