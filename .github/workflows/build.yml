@@ -1,128 +1,57 @@
-# 实习生管理系统 — 跨平台构建 CI
+# 实习生管理系统 — 跨平台构建 CI (使用官方 tauri-action)
 #
 # 触发方式:
-#   - 往 main 分支 push 代码（包含 tag 或特定路径触发）
-#   - 手动 workflow_dispatch（在 GitHub Actions 页面点击"Run workflow"）
+#   - 推送带 v* 格式的 tag (例 v1.0.0) → 自动构建+发布 GitHub Release(全平台产物)
+#   - 手动 workflow_dispatch
+#   - 向 main 分支 push(只上传 Artifacts,不发布 Release)
 #
 # 产物:
-#   - Windows: NSIS 安装包
-#   - Linux: .deb + .AppImage
-#   每个产物上传到 GitHub Actions 的 Artifact，可在运行记录的 Summary 页下载。
+#   - Windows: NSIS 安装包 (.exe)
+#   - Linux:   .deb (x86_64)
+#   Tag 推送时会自动追加到 GitHub Release 页面; 普通 push 只在 Actions 的 Artifacts 区域。
 
 name: Build
 
 on:
   push:
     branches: [main]
+    tags: ["v*"]
     paths-ignore:
       - ".github/**"
       - "docs/**"
       - "README.md"
       - ".gitignore"
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+permissions:
+  contents: write   # 创建 Release 需要
 
 jobs:
-  # ─── Windows NSIS ──────────────────────────────────────────────
-  build-windows:
-    name: Windows (NSIS)
-    runs-on: windows-latest
-    timeout-minutes: 30
+  build:
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: ""
+          - platform: ubuntu-22.04
+            args: ""
+
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: "npm"
-
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
-          target: x86_64-pc-windows-msvc
-
-      - name: Install system dependencies (Tauri 2 CLI)
-        run: npm install -g @tauri-apps/cli
-
-      - name: Install npm dependencies
-        run: npm ci
-
-      - name: Build frontend
-        run: npm run build
-
-      - name: Build Tauri (Windows)
-        run: npx tauri build
+      # 用官方 tauri-action,内部一站式安装 Node / Rust / 系统依赖 / 执行 build
+      - name: Build & bundle (Tauri)
+        uses: tauri-apps/tauri-action@v0
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ""
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
-
-      - name: Upload NSIS installer
-        uses: actions/upload-artifact@v4
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          name: 实习生管理系统_Windows_x64
-          path: src-tauri/target/release/bundle/nsis/*.exe
-          compression-level: 0
-
-  # ─── Linux (deb + AppImage) ────────────────────────────────────
-  build-linux:
-    name: Linux (deb + AppImage)
-    runs-on: ubuntu-22.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: "npm"
-
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
-          target: x86_64-unknown-linux-gnu
-
-      - name: Install system dependencies (Tauri 2 Linux)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            build-essential \
-            curl \
-            wget \
-            file \
-            libssl-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libgtk-3-dev \
-            libsoup-3.0-dev \
-            libjavascriptcoregtk-4.1-dev \
-            libgdk-pixbuf2.0-dev \
-            xorg-dev \
-            libxdo-dev \
-            libasound2-dev
-
-      - name: Install npm dependencies
-        run: npm ci
-
-      - name: Build frontend
-        run: npm run build
-
-      - name: Build Tauri (Linux)
-        run: npx tauri build
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ""
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
-
-      - name: Upload .deb
-        uses: actions/upload-artifact@v4
-        with:
-          name: 实习生管理系统_Linux_x64
-          path: |
-            src-tauri/target/release/bundle/deb/*.deb
-            src-tauri/target/release/bundle/appimage/*.AppImage
-          compression-level: 0
+          # tag 推送时打 tagName 形如 v1.2.3,否则留空 (只生成 Artifacts)
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+          releaseName: "实习生管理系统 ${{ github.ref_name }}"
+          releaseBody: "自动发布:Windows NSIS 安装包 + Linux .deb / AppImage"
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}

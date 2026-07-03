@@ -1,6 +1,8 @@
 # 02 · 数据库设计
 
 > SQLite 数据库的完整 schema、索引、迁移策略与默认数据。
+>
+> **最近更新：2026-07-03** — `initialize_database` 引入 `has_column`、`migration_recompute_done`、索引创建步骤化等更稳健的升级路径；同时 `delete_all_prealloc` 现在只删 `pre_alloc` 状态行。
 
 ## 1. 文件位置
 
@@ -67,7 +69,7 @@ CREATE TABLE IF NOT EXISTS interns (
     end_date              TEXT,                    -- 结束日期 YYYY-MM-DD
     status                TEXT NOT NULL DEFAULT 'active',  -- active / archived
     fixed_department_id   TEXT,                    -- 固定科室 ID（可空）
-    allocation_status     TEXT NOT NULL DEFAULT 'ready',  -- 分配状态 (见下方)
+    allocation_status     TEXT NOT NULL DEFAULT 'ready',-- 分配状态 (见下方)
     created_at            INTEGER NOT NULL,
     updated_at            INTEGER NOT NULL,
     FOREIGN KEY (fixed_department_id) REFERENCES departments(id)
@@ -78,12 +80,15 @@ CREATE TABLE IF NOT EXISTS interns (
 - 当 `fixed_department_id` 非空时：该实习生不进轮转算法，固定分配到该科室的所有月份
 - `end_date` 为空时，系统会使用 `start_date + duration_months 个月` 计算结束日
 - `allocation_status` 是**轮转分配状态的派生/缓存字段**，由后端在 rotation mutation 路径上自动维护（详见 `src-tauri/src/database/dao/rotation.rs::recompute_allocation_status`）：
+
   | 取值 | 含义 | 进入条件 |
   | --- | --- | --- |
   | `ready` | 该实习生尚未生成任何 `rotation_assignments` 记录 | 新增 active intern / rotation 表中该 intern 被清空 |
   | `pre_allocated` | 已生成至少一条 `pre_alloc`，尚未确认 | 预分配成功 / 手动预分配成功 |
   | `confirmed` | 所有 rotation 均为 `confirmed`，且实习期尚未结束 | 确认分配后派生 |
   | `completed` | 所有 rotation 均为 `confirmed`/`completed`，且实习期已结束 | 派生自 `confirmed`（并在 `end_date < 今日` 时升级）|
+
+> 当 `status='archived'` 时，`recompute_allocation_status` 不再覆写字段（保护归档后生造状态）。
 
 ### 3.4 `rotation_assignments` — 轮转明细
 
@@ -106,7 +111,7 @@ CREATE TABLE IF NOT EXISTS rotation_assignments (
 
 **UNIQUE 约束的意义**：
 - 保证每个实习生在同一个月只有一条轮转记录
-- 重做预分配时会先整表 `DELETE` 再 `INSERT`，避免冲突
+- `pre_allocate` 仅清理 `status='pre_alloc'` 行（见 RotationDao::delete_all_prealloc）
 
 ### 3.5 `operation_logs` — 操作审计
 
@@ -131,10 +136,13 @@ CREATE TABLE IF NOT EXISTS operation_logs (
 | `update_department` | 修改科室 |
 | `delete_department` | 删除科室 |
 | `create_system` / `update_system` / `delete_system` | 系统增改删 |
+| `update_intern_allocation` | 直接覆写 `allocation_status` 字段（含清空确认态） |
 | `pre_allocate` | 预分配轮转 |
 | `adjust_rotation` | 手工调整单条 |
 | `confirm_allocation` | 确认分配 |
 | `reset_allocation` | 重置预分配 |
+| `clean_all_rotation` | 清空全部轮转并重新预分配 |
+| `allocate_for_one_intern` | 单实习生预分配 |
 | `auto_archive` / `restore_archive` | 自动归档 / 撤销归档 |
 
 ### 3.6 `settings` — KV 配置
@@ -147,7 +155,10 @@ CREATE TABLE IF NOT EXISTS settings (
 ```
 
 **当前键**：
-- `password_hash` — bcrypt 哈希后的管理员密码
+| key | 说明 |
+| --- | --- |
+| `password_hash` | bcrypt cost=10 哈希后的管理员密码 |
+| `migration_recompute_done` | v1.0.0 启动期升级标记，值为 `"true"` 后跳过一次性全表分配状态重算 |
 
 ## 4. 索引
 
@@ -155,12 +166,14 @@ CREATE TABLE IF NOT EXISTS settings (
 CREATE INDEX idx_interns_status              ON interns(status);
 CREATE INDEX idx_interns_class               ON interns(class_name);
 CREATE INDEX idx_interns_name                ON interns(name);
-CREATE INDEX idx_interns_allocation_status   ON interns(allocation_status);
+CREATE INDEX idx_interns_allocation          ON interns(allocation_status);  -- 创建顺序在 migrate_schema 之后
 CREATE INDEX idx_rotation_intern             ON rotation_assignments(intern_id);
 CREATE INDEX idx_rotation_department         ON rotation_assignments(department_id);
 CREATE INDEX idx_rotation_status             ON rotation_assignments(status);
 CREATE INDEX idx_logs_created                ON operation_logs(created_at);
 ```
+
+> `idx_interns_allocation` 创建时机：`initialize_database` 末尾，`has_column` 守卫 + 老索引 `DROP IF EXISTS` 兜底，确保老 v1.0.0 库升级时不 panic。
 
 ## 5. 迁移策略
 
@@ -172,10 +185,17 @@ ALTER TABLE department_systems ADD COLUMN is_rotation INTEGER NOT NULL DEFAULT 1
 ALTER TABLE department_systems ADD COLUMN rotation_interval INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE interns ADD COLUMN fixed_department_id TEXT;
 ALTER TABLE interns ADD COLUMN end_date TEXT;
-ALTER TABLE interns ADD COLUMN allocation_status TEXT NOT NULL DEFAULT 'ready';  // r-new: 分配状态派生字段
+ALTER TABLE interns ADD COLUMN allocation_status TEXT NOT NULL DEFAULT 'ready';
 ```
 
-`.ok()` 被故意忽略以容忍重复执行，确保升级路径平滑。
+`migrate_schema` 使用以下防御手段：
+
+1. **`has_column(conn, table, column) -> bool`** —— PRAGMA table_info 检查
+   - `allocation_status` 列只在该列确实缺失时 ALTER 一次（防 duplicate column panic）
+   - `idx_interns_allocation` 索引的创建也分支在 `has_column` 内
+2. **`.ok()` 兜底** —— 老 ALTER 重复时不抛
+3. **`migration_recompute_done` 设置项** —— 老库只跑一次全表 `recompute_allocation_status_all`，写 `"true"` 后下次启动直接跳过
+4. **`DROP INDEX IF EXISTS + CREATE INDEX IF NOT EXISTS`** —— 老库可能存在的坏索引清理后重建
 
 ## 6. 默认数据初始化
 
@@ -219,7 +239,6 @@ let conn = state.db.lock().unwrap();
    └────────────────────┘    ┌──────────────────┐  n
                              │   departments    │─────┐
                              │ (id, name,       │     │
-                             │  capacity,       │     │
                              │  system_id FK)   │     │
                              └──────────────────┘     │
                                     ▲                 │
@@ -246,7 +265,7 @@ let conn = state.db.lock().unwrap();
                              └────────────────────────┘
    ┌────────────────────┐
    │ operation_logs     │ （独立审计表，与其他表无外键）
-   │ settings (KV)      │ （独立 KV 表，仅 password_hash 一个键）
+   │ settings (KV)      │ （独立 KV 表：password_hash, migration_recompute_done）
    └────────────────────┘
 ```
 
@@ -275,3 +294,4 @@ ORDER BY COALESCE(i.name, ''), r.month_index;
 ```
 
 > 使用 `LEFT JOIN + COALESCE` 的原因：实习生或科室被删除后，轮转记录里仍会出现「已删除」标记，便于审计追溯。
+> `find_all_current` 当前已**撤销**「仅本月之后」的过滤（r13 撤销：保留全部实习期月份，让前端 UI 自己判定「历史/现在/未来」标签）。

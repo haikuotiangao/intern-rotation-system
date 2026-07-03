@@ -1,27 +1,36 @@
 # 名词表（Glossary）
 
+> **最近更新：2026-07-03** — 新增 4 态 `allocation_status` / `migration_recompute_done` 等术语，将多处 `5 级回退` / `6 维度（UI 颜色）` 更新。
+
 | 术语 | 解释 |
 | --- | --- |
 | **Tauri** | Rust + 前端的桌面应用框架。本项目使用 Tauri 2。 |
 | **IPC** | 进程间通信。Tauri 使用 invoke 进行前后端 JSON 序列化调用。 |
 | **前端** | React 18 + TypeScript + Tailwind。打包为静态 SPA，运行在 WebView 中。 |
-| **后端** | Rust 主进程，负责 SQLite IO + 业务逻辑 + PDF 生成。 |
+| **后端** | Rust 主进程，负责 SQLite IO + 业务逻辑 + PDF / CSV 生成。 |
 | **DAO** | Data Access Object。封装 SQL 原子操作的层。 |
 | **Service** | 业务逻辑层。接收 DAO 输出，写入日志。 |
-| **Command** | Tauri IPC 命令。薄壳，仅获取 state 并调用 Service。 |
+| **Command** | Tauri IPC 命令。薄壳，仅获取 state 并调用 Service。v1.0.0 共 42 个。 |
 | **轮转系统 (DepartmentSystem)** | 一组科室的逻辑分组（如内科系统、外科系统）。`is_rotation` 决定是否参与轮转。 |
 | **轮转 / 固定** | 实习生的轮转类型。轮转者轮流入多个系统；固定者全期都在单一科室。 |
 | **轮转分配 (Rotation Assignment)** | 实习生在某月应该去的科室。 |
 | **预分配 (pre_alloc)** | 状态机中的初始状态，记录尚未确认。 |
 | **已确认 (confirmed)** | 状态机中的提交状态，方案锁定。 |
 | **已完成 (completed)** | 历史状态，由归档时回填。 |
+| **固定 (fixed)** | `RotationOverview` 内部使用虚拟 status，表示固定科室学员本月在固定科室（不持久化）。 |
 | **自动归档 (auto_archive)** | 系统按结束日把 active → archived，并把相关轮转 → completed。 |
-| **rot_start / rotation_start** | 全局轮转起点：最早实习生 start_date 所在月 1 号。 |
+| **rot_start / rotation_start** | 全局轮转起点：当前自然月 1 号（r12 起改为动态）。 |
 | **personal_start** | 某个实习生个人的轮转起点：start_date 所在月 1 号。 |
 | **month_index** | 1-based 月份序号，从 rotation_start 计起。 |
-| **4 级回退分配** | 轮转算法的核心策略。详见 [04-rotation-algorithm.md](../04-rotation-algorithm.md)。 |
+| **5 级回退分配** | 轮转算法的核心策略。详见 [04-rotation-algorithm.md](../04-rotation-algorithm.md)。 |
+| **P4a** | 第 4 级回退的子级，仅在「轮转系统」（is_rotation=true）下的科室挑——f22 修复，避免把 fixed 科室意外派进轮转序列。 |
 | **MRV** | Most Restricted Variable，最受限变量优先。本项目用于实习生排序。 |
 | **Hamilton 最大余数法** | 比例分配算法。本项目保留函数 `proportional_assign` 备用。 |
+| **allocation_status** | interns 表的派生字段：ready / pre_allocated / confirmed / completed。由后端 rotation mutation 自动维护。 |
+| **ready** | 实习生尚未生成任何 rotation 行 → `allocation_status='ready'`。 |
+| **pre_allocated** | 至少 1 条 `pre_alloc` rotation。 |
+| **migration_recompute_done** | settings KV 中的 v1.0.0 启动期升级标记，写 `"true"` 后不再跑 `recompute_allocation_status_all`。 |
+| **clear_invalid_fixed_dept** | InternDao 的防御性 sanitize：若 `fixed_department_id` 不在 departments 主键集合，降级为 NULL。 |
 | **JSON 序列化** | 跨语言参数序列化约定：前端 camelCase，后端 snake_case。Tauri 自动转换。 |
 | **WAL 模式** | SQLite Write-Ahead Logging，提升并发读性能。 |
 | **bcrypt** | 密码哈希算法，本项目 cost = 10。 |
@@ -30,3 +39,6 @@
 | **轮转甘特图 (RotationOverview)** | 实习生 × 月份矩阵的展示页。 |
 | **PDF 通知单** | 按月汇总实习生的进修 / 实习通知，A4 双份/页。 |
 | **通知单编号** | `YYYYMM + 4 位序号`（如：`2026070001`）。 |
+| **r-export** | export_rotation_notice_pdf / export_*_csv 的一组护栏：仅导出**全部 rotation 都是 confirmed** 的实习生。 |
+| **VIEW_WINDOW_SIZE** | 实习总览右栏可见月窗口大小 = 6。 |
+| **v1.0.0 累计修复** | 见 [09-security.md § 12 → 10 修复](../09-security.md)；包括 UI/PDF/构建/CI/分配状态派生 等。 |

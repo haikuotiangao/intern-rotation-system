@@ -1,6 +1,8 @@
 # 01 · 系统架构
 
 > 介绍项目的整体分层、技术栈选型，以及关键的数据流向。
+>
+> **最近更新：2026-07-03** — 反映 v1.0.0 当前状态：精简后的 release profile、Cargo.toml 真实依赖、context 中实际命令数为 42、PDF/CSV 双轨导出。
 
 ## 1. 整体分层
 
@@ -32,24 +34,34 @@
 
 ## 2. 技术栈
 
-### 2.1 后端
+### 2.1 后端（Cargo.toml 真实依赖）
 
 | 依赖 | 版本 | 用途 |
 | --- | --- | --- |
-| `tauri` | 2 | 桌面应用框架（IPC、窗口管理、bundle） |
+| `tauri` | 2（`features=["devtools"]`） | 桌面应用框架（IPC、窗口管理、bundle） |
 | `tauri-plugin-dialog` | 2 | 文件保存对话框 |
 | `tauri-plugin-fs` | 2 | 文件系统读写 |
-| `tauri-plugin-shell` / `process` / `updater` | 2 | 预留给后续扩展（当前未注册） |
 | `serde` / `serde_json` | 1 | 前后端 JSON 参数序列化 |
-| `rusqlite` | 0.31（bundled） | SQLite 嵌入式数据库（无需外部依赖） |
-| `uuid` | 1（v4） | 主键 ID 生成 |
-| `chrono` | 0.4 | 日期时间处理 |
+| `rusqlite` | 0.31（`bundled`） | SQLite 嵌入式数据库（无需外部依赖） |
+| `uuid` | 1（`v4`） | 主键 ID 生成 |
+| `chrono` | 0.4（`serde`） | 日期时间处理 |
 | `bcrypt` | 0.15 | 管理员密码哈希 |
-| `tokio` | 1（full） | 异步运行时（Tauri 2 默认需要） |
+| `tokio` | 1（`full`） | tauri 2 runtime 需要 |
 | `printpdf` | 0.4 | PDF 通知单生成 |
-| `rand` | 0.9 | 当前未使用，预留 |
+| `rusttype` | 0.9 | 字体宽度解析（PDF r12 单位修正） |
 
-### 2.2 前端
+> `tauri-plugin-shell` / `process` / `updater` 已从 v1.0.0 中**移除**（之前预留但未注册），代码更轻量。
+
+`[profile.release]` 关键字段（v1.0.0 精简版）：
+```toml
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+opt-level = "s"
+panic = "abort"
+```
+
+### 2.2 前端（package.json 实际依赖）
 
 | 类别 | 包 |
 | --- | --- |
@@ -57,12 +69,12 @@
 | **构建工具** | vite@5, typescript@5, @vitejs/plugin-react@4 |
 | **样式方案** | tailwindcss@3, postcss, autoprefixer |
 | **数据状态** | @tanstack/react-query@5 |
-| **UI 基础组件** | @radix-ui/*（完整套件），lucide-react（图标），class-variance-authority |
-| **表单 / 校验** | react-hook-form, zod, @hookform/resolvers |
+| **UI 基础组件** | lucide-react（图标），clsx + tailwind-merge + tailwindcss-animate |
 | **交互动画** | framer-motion@11, react-hot-toast |
-| **表格 / 拖拽** | xlsx@0.18（Excel），recharts@2，dnd-kit/*（拖拽） |
-| **PDF** | @react-pdf/renderer（备用，主路径走 Rust） |
-| **桌面桥** | @tauri-apps/api@2, @tauri-apps/plugin-* |
+| **表格 / Excel** | xlsx@0.18（仅前端 Excel 模板下载，PDF/CSV 主路径走 Rust） |
+| **桌面桥** | @tauri-apps/api@2, @tauri-apps/plugin-dialog/fs |
+
+> v1.0.0 移除了：`@radix-ui/*`、`react-hook-form`、`zod`、`@hookform/resolvers`、`recharts`、`dnd-kit/*`、`@react-pdf/renderer`。
 
 ## 3. 目录结构
 
@@ -146,10 +158,12 @@ src-tauri/src/
 │   ├── mod.rs · intern_service.rs · department_service.rs
 │   ├── rotation_service.rs     # 核心：pre_allocate 算法（450+ 行）
 │   ├── archive_service.rs · settings_service.rs · log_service.rs
-└── commands/                   # Tauri 命令暴露层
-    ├── mod.rs · intern_commands.rs · department_commands.rs
-    ├── rotation_commands.rs · archive_commands.rs · settings_commands.rs
-    └── report_commands.rs      # 含 PDF 生成
+└── commands/                   # Tauri 命令暴露层（共 42 个 IPC;7 个模块）
+    ├── mod.rs · intern_commands.rs (8) · department_commands.rs (9)
+    ├── rotation_commands.rs (9，含 AllocationInput 入参结构)
+    ├── archive_commands.rs (4) · settings_commands.rs (6)
+    ├── report_commands.rs (6，PDF + 2 个 CSV)      # 含 PDF + CSV 生成
+    └── devtools_command.rs (1)
 ```
 
 ## 4. 关键数据流

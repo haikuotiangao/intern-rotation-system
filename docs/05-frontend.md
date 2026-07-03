@@ -1,6 +1,8 @@
 # 05 · React 前端
 
 > React + TypeScript 前端的模块划分、状态管理、UI 规范。
+>
+> **最近更新：2026-07-03** — 反映实际 `package.json`：v1.0.0 已移除 `@radix-ui/*` / `react-hook-form` / `zod` / `recharts` / `dnd-kit/*` / `@react-pdf/renderer` 等冗余依赖；只保留 lucide-react + clsx + tailwind-merge。
 
 ## 1. 应用启动
 
@@ -89,17 +91,20 @@ export function useXxxMutation() {
 
 | Query Key | 来源 hook | 失效时机 |
 | --- | --- | --- |
-| `['interns', status]` | `useInterns(status)` | 创建 / 修改 / 删除 / 导入 / 归档 / 撤销归档 |
-| `['intern', id]` | `useIntern(id)` | 单条修改后 |
+| `['interns', status]` | `useInterns(status)` | 创建 / 修改 / 删除 / 导入 / 归档 / 撤销归档 / 单实习生 allocation_status 覆写 |
+| `['intern', id]` | `useIntern(id)` | 单条修改后 — 2026-07-03 修复：双 invalidate |
 | `['interns', 'archived']` | `useArchivedInterns` | 归档 / 撤销 |
 | `['departments']` | `useDepartments` | 增改删科室 |
 | `['department-systems']` | `useDepartmentSystems` | 增改删系统 |
 | `['total-capacity']` | `useTotalCapacity` | 增改删科室后 |
-| `['rotation-current']` | `useAllCurrentRotation` | 预分配 / 调整 / 确认 / 重置 |
-| `['rotation-intern', id]` | `useRotationByIntern` | 该实习生调整后 |
+| `['rotation-current']` | `useAllCurrentRotation` | 预分配 / 调整 / 确认 / 重置 / 单实习生预分配 |
+| `['rotation-intern', id]` | `useRotationByIntern` | 该实习生调整后（r-fix：手动调整也要失效） |
 | `['rotation-month', i]` | `useRotationByMonth` | 同上 |
+| `['rotation-archived']` | (r-fix 后新增的失效 cache) | r-fix：fixed_department 切换后必须失效 |
 | `['operation-logs', ...]` | `useOperationLogs` | 仅手动刷新 |
 | `['log-count']` | `useLogCount` | 同上 |
+
+> 2026-07-03 起，`useUpdateIntern` 强制 invalidate + refetch `['intern', id]`、`['interns']`、`['rotation-current']`、`['rotation-archived']` 共 4 个 key —— 修复了「编辑后跳详情页看不到新字段」的可见性 bug。
 
 ## 4. 样式规范
 
@@ -221,6 +226,13 @@ getActionTypeLabel(type) -> 中文标签
   - 否则 → 密码输入模式，调用 `verifyLogin`
 - 通过 → 触发 `onLogin()` 切到 Layout
 - 设置失败显示 toast
+
+### 5.7 Sidebar 拖拽分隔（v1.0.0）
+
+- `Layout.tsx`：侧栏宽度可在 [180, 400] 之间手动拖拽折叠
+- 折叠时显示 64px 折叠态；展开时宽度默认 240px 起步
+- 宽度保存到 `localStorage['sidebarWidth']`
+- 顶部进度条：路由切换 80ms / 260ms 阶段跳到 70% / 100%（与 framer-motion main 动画配套）
 
 ## 6. 类型对齐
 

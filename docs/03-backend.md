@@ -1,6 +1,8 @@
 # 03 · Rust 后端
 
 > Tauri + Rust 后端的分层实现。所有外部可调用命令在 `lib.rs` 中注册。
+>
+> **最近更新：2026-07-03** — 命令数从 38 → 42；新增 `update_intern_allocation_status` / `clean_all_and_repreallocate_rotation` / `allocate_for_one_intern` / `open_devtools` / 2 个 `export_*_csv` 命令；`rotation_service` 改用 5 级回退、reset 走"pre_alloc&&未开始"过滤；删除 PDF `include_bytes!` 嵌入式字体，体积从 +9MB → 0。
 
 ## 1. 模块入口与启动
 
@@ -17,7 +19,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .manage(app_state)
-        .invoke_handler(tauri::generate_handler![/* 38 commands */])
+        .invoke_handler(tauri::generate_handler![/* 42 commands */])
         .run(tauri::generate_context!())
         .expect("启动失败");
 }
@@ -25,10 +27,10 @@ pub fn run() {
 
 启动时执行：
 1. **打开 / 创建** SQLite 数据库
-2. **建表 + 迁移 + 默认数据**
+2. **建表 + 迁移 + 默认数据**（含 `migration_recompute_done` 一次性升级）
 3. **注册 Tauri 插件**（dialog, fs）
 4. **托管** AppState
-5. **注册** 38 条 IPC 命令
+5. **注册** 42 条 IPC 命令
 
 ## 2. 分层架构
 
@@ -113,6 +115,7 @@ pub struct InternService;
 impl InternService {
     pub fn create     (conn, intern, operator) -> Result<Intern>
     pub fn update     (conn, intern, operator) -> Result<Intern>
+    pub fn update_allocation(conn, &str intern_id, &str status, operator) -> Result<()>
     pub fn delete     (conn, id, operator)    -> Result<()>
     pub fn batch_import(conn, &[intern], operator) -> Result<i32>
     pub fn find_all   (conn, status)         -> Result<Vec<Intern>>
@@ -122,7 +125,12 @@ impl InternService {
 }
 ```
 
-**所有写操作都自动产生一条 `operation_log`**，`operator` 由前端传入（当前固定为 `"管理员"`）。
+**业务规则：**
+- `start_date ≥ 今日`：create / batch_import 路径强校验；`update` 仅在 `start_date` **真的被修改**（与 DB 旧值不一致）时才校验（f25 修复）
+- `fixed_department_id` 切换联动（r-f22）：
+  - 空 → 有：DELETE 该实习生全部 rotation 行，强制 `allocation_status='confirmed'`
+  - 有 → 空：DELETE 该实习生全部 rotation 行，强制 `allocation_status='ready'`
+- 所有写操作都自动产生一条 `operation_log`，`operator` 由前端传入（当前固定为 `"管理员"`）
 
 ### 5.2 department_service.rs
 
@@ -139,15 +147,17 @@ if count > 0 {
 }
 ```
 
-### 5.3 rotation_service.rs （核心，450+ 行）
+### 5.3 rotation_service.rs （核心，752 行）
 
 详见 [04-rotation-algorithm.md](./04-rotation-algorithm.md)。
 
 关键方法：
-- `pre_allocate(conn) -> Result<Vec<RotationWithNames>>` — 一键预分配所有实习生
-- `manual_adjust(conn, assignment_id, new_dept_id, operator)` — 单条调整
-- `confirm_allocation(conn, operator)` — 锁定方案（pre_alloc → confirmed）
-- `reset_allocation(conn, operator)` — 清空预分配
+- `pre_allocate(conn) -> Result<Vec<RotationWithNames>>` — 一键预分配所有 `allocation_status='ready'` 的实习生 + 固定科室
+- `manual_adjust(conn, assignment_id, new_dept_id, operator)` — 单条调整（含 recompute）
+- `confirm_allocation(conn, operator)` — 锁定方案（pre_alloc → confirmed + recompute）
+- `reset_allocation(conn, operator) -> Result<Vec<RotationWithNames>>` — 删 `pre_alloc && start_date >= 今日` 的行；不再无脑全清
+- `clean_all_and_repreallocate(conn, operator)` — 全表 DELETE + 重新分配（r13）
+- `allocate_for_one_intern(conn, intern_id, &[(month_index, dept_id)], operator)` — 单个实习生按月份写入
 - `get_by_intern / get_by_month / get_all_current` — 各种查询
 
 ### 5.4 archive_service.rs
@@ -201,18 +211,19 @@ pub fn get_interns(state: State<'_, AppState>, status: Option<String>) -> Result
 }
 ```
 
-### 6.1 命令清单（共 38 个，分类索引）
+### 6.1 命令清单（共 42 个，分类索引）
 
 详见 [reference/tauri-commands.md](./reference/tauri-commands.md)。
 
 | 模块 | 命令数 | 典型命名 |
 | --- | --- | --- |
-| intern | 7 | `get_interns`, `create_intern`, ... |
+| intern | 8 | `get_interns`, `update_intern_allocation_status`, ... |
 | department | 9 | `get_departments`, `delete_department_system`, ... |
-| rotation | 7 | `pre_allocate_rotation`, `confirm_allocation`, ... |
+| rotation | 9 | `pre_allocate_rotation`, `allocate_for_one_intern`, ... |
 | archive | 4 | `auto_archive`, `restore_archive`, ... |
 | settings | 6 | `verify_login`, `setup_password`, `change_password`, `get_operation_logs`, ... |
-| report | 4 | `export_rotation_notice_pdf`, ... |
+| report | 6 | `export_rotation_notice_pdf`, `export_rotation_plan_csv`, `export_department_detail_csv`, ... |
+| devtools | 1 | `open_devtools` |
 
 ### 6.2 注册流程
 
@@ -252,25 +263,43 @@ pub fn export_rotation_notice_pdf(
 4. 排序、生成 `YYYYMM + 4位序号` 编号
 5. 用 `printpdf` 输出 PDF 字节流
 
-### 7.2 字体加载策略
+### 7.2 字体加载策略（v1.0.0-r10 移除嵌入）
+
+不再使用 `include_bytes!` 嵌入字体（那会让 exe +9MB）。r10 起改为「运行时优先扫描 + 系统兜底」：
 
 ```rust
-// 候选路径顺序
-"C:\\Windows\\Fonts\\simsun.ttc"
-"C:\\Windows\\Fonts\\simsun.ttf"
-"C:\\Windows\\Fonts\\msyh.ttc"
-"C:\\Windows\\Fonts\\kaiu.ttf"
-"C:\\Windows\\Fonts\\simfang.ttf"
-"C:\\Windows\\Fonts\\msjh.ttc"
+// 1) 应用自带 fonts/（Tauri resources）
+let candidates = [
+    "fonts/SourceHanSansSC-Regular.ttf",
+    "fonts/SourceHanSansSC-Subset.ttf",
+    "resources/fonts/SourceHanSansSC-Regular.ttf",
+];
+// 2) Windows 系统字体 TTF（按概率从大到小）
+const WIN_FALLBACK: &[&str] = &[
+    "simsun.ttf", "simhei.ttf", "simfang.ttf", "simkai.ttf",
+    "SIMYOU.TTF", "NotoSansSC-VF.ttf", "msyh.ttf", "arialuni.ttf",
+    "FZLANTY_GB18030.ttf", "SIMLI.TTF", "SourceHanSansSC-Regular.otf",
+];
+// 3) .ttc 兜底（首字型 magic "ttcf" + 头校验）
+const TTC_FALLBACK: &[&str] = &["msyh.ttc", "msjh.ttc"];
 ```
 
-- 读 `ttc` 文件头判断，若是 `ttcf` 则提取第一份 TTF
-- 任意一个命中即返回，否则 `AppError::new("未找到支持中文的字体文件")`
+校验逻辑：
+- `is_valid_ttf`：`\x00\x01\x00\x00` 或 `"true"` magic + num_tables ∈ [4, 64]
+- `extract_first_ttf_from_ttc`：ttc 头 4 字节为 `"ttcf"` 时，按 offset table 第一个 entry 切出首字型
 
-### 7.3 排版
-- A4 (210×297mm)
-- 同一页面上下两份通知单（`notice_height = (page_height - top_margin - bottom_margin) / 2`）
-- 每份通知内容：标题、编号、科室、单位、正文、日期、医院落款
+### 7.3 字符宽度解析（v1.0.0-r12）
+
+- 真正用 `rusttype::Font::try_from_vec(...)` 解析字体表
+- `face.glyph(c).scaled(scale).h_metrics().advance_width` 拿真实 advance width
+- glyph 缺字时 fallback 为 CJK 全角（`pt * MM_PER_TT * 0.95`）
+- 单位统一为 **mm**：所有 `wrap_text` / 居中/右对齐都用 `USABLE_WIDTH_MM = 160mm`
+
+### 7.4 排版
+- A4 (`PAGE_WIDTH_MM = 210`, `PAGE_HEIGHT_MM = 297`)
+- 同页上下两份通知单（`notice_height = (PAGE_HEIGHT_MM - top_margin - bottom_margin) / 2`）
+- 每份通知内容：标题、编号、科室、学校、正文、日期、医院落款
+- 通知单编号：`{YYYYMM}{4 位序号}`
 
 ## 8. 调试输出
 

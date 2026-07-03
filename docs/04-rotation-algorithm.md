@@ -1,8 +1,10 @@
 # 04 · 轮转分配核心算法
 
-> 本项目最重要的业务逻辑，位于 [`src-tauri/src/services/rotation_service.rs`](../../src-tauri/src/services/rotation_service.rs)，共 ~450 行。
+> 本项目最重要的业务逻辑，位于 [`src-tauri/src/services/rotation_service.rs`](../../src-tauri/src/services/rotation_service.rs)，共 **752 行**。
 >
 > 维护者必读。任何修改前请完整阅读 `pre_allocate` 与 `allocate_group` 的源码。
+>
+> **最近更新：2026-07-03** — 5 级回退（P4a 拆为只看轮转系统）；`pre_allocate` 仅作用于 `allocation_status='ready'` 实习生（保护已确认历史）；`reset_allocation` 仅清 `pre_alloc && 未开始`，不再是全表清空；末尾有 `recompute_allocation_status` 派生钩子。
 
 ## 1. 目标
 
@@ -207,7 +209,7 @@ sorted_interns.sort_by_key(|i| {
 - 还有 5 个未访问的实习生 → 排后面
 - 先给选项最少的安排，能避免后期「无科室可分」
 
-### 6.4 四级回退分配（核心）
+### 6.4 五级回退分配（核心，f22 拆分）
 
 对每个实习生按以下顺序挑选 `(系统, 科室)` 对：
 
@@ -217,9 +219,10 @@ sorted_interns.sort_by_key(|i| {
 for sys_idx in 0..n_systems {
     if assigned_counts[sys_idx] >= sys_capacities[sys_idx] { continue; }
     if Some(sys_idx) == last_month_sys { continue; }
-    for dept in dept_by_sys[sys_idx] {
+    for dept in rotation_departments.iter().filter(|d| d.system_id == rotation_systems[sys_idx].id) {
         if visited.contains(&dept.id) { continue; }
-        if dept_used(dept) >= dept.capacity { continue; }
+        let dept_used = global_dept_usage.get(&dept.id).copied().unwrap_or(0);
+        if dept_used >= dept.capacity as usize { continue; }
         return Some((sys_idx, dept));
     }
 }
@@ -233,9 +236,13 @@ for sys_idx in 0..n_systems {
 
 > 当多系统容量已用尽，回退到同上月系统，至少保证此前分配进度不被打乱。
 
-#### Priority 4 — 任何有剩余容量的科室（允许重复）
+#### Priority 4a — 仅轮转系统 + 未访问 + 容量（f22 修复）
 
-> 终极兜底。即使重复，依然能找到可用位置。
+> f22 修复：只考虑 `is_rotation=true` 系统下的科室，避免把信息科/医保办等固定科室意外派进轮转序列。
+
+#### Priority 5 — **任何**有剩余容量的科室（允许重复）
+
+> 终极兜底。即使重复，依然能找到可用位置；只对旋转系统科室进行检查。
 
 ### 6.5 写入逻辑
 
@@ -261,6 +268,9 @@ last_department.entry(intern.id).or_default().push(dept.id.clone());
 | `completed` | `auto_archive` 修改 | 否 |
 
 `manual_adjust` 仍把状态改回 `pre_alloc`（只在 `pre_alloc` 阶段可手动调整）。
+任何 rotation mutation 完成后都会调用 [`recompute_allocation_status(intern_id)`](../../src-tauri/src/database/dao/rotation.rs) 同步 `interns.allocation_status`。
+
+> **注意**：`allocation_status='archived'` 时，`recompute_allocation_status` 不会覆写派生字段（保留归档态）。
 
 ## 8. `manual_adjust` 的作用
 
@@ -276,10 +286,16 @@ pub fn manual_adjust(
 - 对单条记录直接 `UPDATE department_id`
 - 状态恢复为 `pre_alloc`
 - 写一条 `adjust_rotation` 日志
+- 调用 `recompute_allocation_status(intern_id)` 同步派生字段
 
 适用场景：
 - 「轮转分配」矩阵中点击单元格出现调整 modal
 - 「实习生详情」页调整单月科室
+
+## 8.5 `reset_allocation`（r14 范围收窄）
+
+早期 `reset_allocation` 全表清 `pre_alloc`；v1.0.0 改为**仅删 `pre_alloc && start_date >= 今日`**，避免误删已确认/已开始的轮转历史。开发者如需全清场景（包含 confirmed），请改用 `clean_all_and_repreallocate_rotation`。
+
 
 ## 9. 操作日志
 
@@ -316,9 +332,23 @@ LogDao::insert(conn, &OperationLog {
 | --- | --- | --- | --- |
 | 10 | 12 | < 10ms | 普通医院实习生规模 |
 | 50 | 24 | < 50ms | 略大规模 |
-| 200+ | 36 | 数百毫秒 | 算法当前仍是 O(月 × 人 × 系统 × 科室) |
+| 200+ | 36 | 数百毫秒 | 算法当前是 O(月 × 人 × 系统 × 科室) |
 
 **算法当前不并发**，但在 Mutex 锁定下调用足够快。如果未来要支撑 1000+ 人，建议迁移到 OR-tools / CP-SAT 求解器。
+
+## 11.5 `allocation_status` 派生（v1.0.0 关键概念）
+
+为了让前端不必自行根据 rotation 行推断分配进度，`interns.allocation_status` 字段由后端在每条 rotation 写路径后自动维护：
+
+| 派生规则 | 值 |
+| --- | --- |
+| 0 条 rotation | `ready` |
+| 存在 `pre_alloc`（且未被确认/完成） | `pre_allocated` |
+| 全部 `confirmed`/`completed` 且 `end_date < 今日` | `completed` |
+| 全部 `confirmed`/`completed` 且未结束 | `confirmed` |
+| 已经 `archived` | 保留覆盖，不自动重派生 |
+
+`schema.rs::derive_allocation_status_for_intern` 是该派生的唯一参考实现，启动期对老 v1.0.0 库跑一次全表校正（仅一次，写 `migration_recompute_done=true` 标记）。
 
 ## 12. 修改算法的 Checklist
 

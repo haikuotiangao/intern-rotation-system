@@ -1,6 +1,8 @@
 # 08 · 构建与部署
 
 > 开发环境、生产环境、安装包产出的全部命令与注意事项。
+>
+> **最近更新：2026-07-03** — v1.0.0 release profile 已精简：`lto=fat`、`codegen-units=1`、`strip=symbols`、`opt-level=s`、`panic=abort`；删除 PDF 嵌入式字体 → 安装包体积从原 11.65MB 压到 **2.65MB**（约 77% 体积下降）；新增 GitHub Actions CI（Windows NSIS + Linux deb + AppImage）。
 
 ## 1. 环境前置
 
@@ -63,17 +65,26 @@ npm run tauri build
 | 类型 | 路径 |
 | --- | --- |
 | 单文件可执行 | `src-tauri/target/release/intern-rotation-system.exe` |
-| 安装包 (NSIS) | `output/实习生管理系统_1.0.0_x64-setup.exe` |
-| 安装包（无 NSIS，按需） | `src-tauri/target/release/bundle/msi/*.msi` 等 |
+| 安装包 (NSIS) | `output/实习生管理系统_1.0.0_x64-setup.exe`（**v1.0.0 约 2.65 MB**） |
+| 安装包（deb / AppImage） | CI 自动产出 |
 
-> NSIS 配置在 `tauri.conf.json` 的 `bundle.targets = "nsis"` 字段控制。
+> `tauri.conf.json` 的 `bundle.targets = ["nsis", "deb", "appimage"]` — Windows 本地构建 only NSIS，CI 自动加 Linux 目标。
 
-### 5.2 性能优化点
+### 5.2 性能优化点（v1.0.0 精简）
 
 - `rusqlite` 用 `bundled` 特性避免依赖系统库，但增加 ~1 MB 二进制体积
-- Rust 端 release 默认 LTO
+- Rust 端 release 配置（见 `Cargo.toml`）：
+  ```toml
+  [profile.release]
+  lto = "fat"
+  codegen-units = 1
+  strip = "symbols"
+  opt-level = "s"
+  panic = "abort"
+  ```
+- r10 修复：**PDF 字体不再用 `include_bytes!` 内嵌**（原 +9.75 MB），改为运行时优先扫描 `fonts/SourceHanSansSC-Regular.ttf` → Windows 系统 TTF/TTC 兜底
 - 前端 Vite build，已开启 tree-shaking 与 css minify
-- 字体在 Rust 端动态加载，不打包进二进制
+- 前端依赖精简：移除 `@radix-ui/*`、`react-hook-form`、`zod`、`recharts`、`dnd-kit/*`、`@react-pdf/renderer` 等
 
 ## 6. 数据持久化与迁移
 
@@ -114,6 +125,22 @@ version = "1.1.0"
 | 窗口大小 | 1400 × 900，最小 1200 × 800 |
 | 数据目录 | `~/.intern-rotation/data.db` |
 | 日志目录 | （当前未配置） |
+| v1.0.0 安装包体积 | 约 **2.65 MB**（NSIS） |
+
+## 8.5 跨平台 CI（v1.0.0 新增）
+
+`.github/workflows/build.yml` 跨平台工作流：
+
+| Job | Runner | 产物 | 触发 |
+| --- | --- | --- | --- |
+| `build-windows` | `windows-latest`（30 min） | NSIS `.exe` 上传到 artifact `实习生管理系统_Windows_x64` | push to main / PR / workflow_dispatch |
+| `build-linux` | `ubuntu-22.04`（30 min） | `.deb` + `.AppImage` 上传到 artifact `实习生管理系统_Linux_x64` | 同上 |
+
+CI 配置要点：
+- Node 20 + Rust stable
+- Linux job 预装：`libwebkit2gtk-4.1-dev`、`libsoup-3.0-dev`、`libjavascriptcoregtk-4.1-dev`、`librsvg2-dev`、`libayatana-appindicator3-dev`、`xorg-dev`、`libasound2-dev` 等 Tauri 2 Linux 依赖
+- `tauri signing private key` 留空（无代码签名）
+- `concurrency`：同一 ref 的旧运行自动 cancel
 
 ## 9. 常见构建问题
 
@@ -140,8 +167,10 @@ cargo clean --manifest-path src-tauri/Cargo.toml
 
 PDF 中文字体若加载失败会回退到错误信息。需保证 Windows 字体目录中至少有一份中文字体（见 `report_commands.rs::load_cjk_font`）。
 
-## 10. 后续优化清单
+## 10. 后续优化清单（v1.0.0 已处理部分）
 
-- [ ] `tauri-plugin-shell` 等已声明但未使用的插件可在 `lib.rs` 选择性注册/移除
-- [ ] Cargo.toml 可加 release profile 配置：`lto = true, codegen-units = 1`
-- [ ] 增加 `dev:win` 等跨平台命令
+- [x] `Cargo.toml` 加 release profile 配置：`lto = fat, codegen-units = 1, strip = symbols, opt-level = s, panic = abort`（v1.0.0 已合并）
+- [x] PDF 字体从 `include_bytes!` 改为运行时优先扫描（r10；体积 -9.75MB）
+- [x] 前端依赖精简：移除 `@radix-ui/*` / `react-hook-form` / `zod` / `recharts` / `dnd-kit/*` / `@react-pdf/renderer`
+- [x] GitHub Actions CI 配置（Windows NSIS + Linux deb/AppImage）
+- [ ] `tauri-plugin-shell` 等未用插件已从 Cargo.toml 整体移除（无需再注册）

@@ -1,6 +1,8 @@
 # 07 · 业务模块详解
 
 > 拆解每个业务流（实习生、科室、轮转、归档、报表、配置）的关键场景、前后端调用链、数据约束。
+>
+> **最近更新：2026-07-03** — `action_type` 增到 16 种（含 `update_intern_allocation` / `clean_all_rotation` / `allocate_for_one_intern`）；`reset_allocation` 改为「pre_alloc+未开始」过滤；`pre_allocate_rotation` 仅作用于 `allocation_status='ready'` 实习生。
 
 ## 1. 学员（实习生）模块
 
@@ -48,6 +50,35 @@
 ### 1.4 删除约束
 
 `intern_commands.rs::delete_intern` → `InternDao::delete` 先 `DELETE FROM rotation_assignments WHERE intern_id=?1` 再 `DELETE FROM interns WHERE id=?1`。
+
+### 1.5 `allocation_status` 4 态（v1.0.0 关键）
+
+```text
+  入库时默认 ready（allocation_status）
+         │
+         ▼
+  pre_allocate_rotation（仅 ready 实习生进入）
+         │
+         ▼
+  pre_allocated（至少 1 条 pre_alloc）
+         │
+         ▼
+  confirm_allocation（全表 pre_alloc → confirmed）
+         │
+         ▼
+  confirmed（全部 confirmed/completed，未结束）
+         │
+   end_date < 今日 时
+         │
+         ▼
+  completed（派生自 confirmed）
+
+  旁路（业务需求：绕过派生）：
+  update_intern_allocation_status(intern_id, status, operator)
+  - 仅改字段写日志，但 rotation 行不变
+```
+
+固定科室实习生（`fixed_department_id` 非空）由于不进轮转算法，初始为 `confirmed`，**不会**走 `ready → pre_allocated` 流程。
 
 ## 2. 科室 / 系统模块
 
@@ -182,9 +213,27 @@ const instructions = [
 
 ## 6. 操作日志模块
 
-### 6.1 14 种 action_type
+### 6.1 16 种 action_type
 
-（详见 [reference/status-enums.md](./reference/status-enums.md)）
+| 类型 | 操作 | 触发 |
+| --- | --- | --- |
+| `create_intern` | 新增实习生 | InternService::create |
+| `update_intern` | 修改实习生 | InternService::update（含 `fixed_changed_to_set` / `fixed_changed_to_clear` 标记） |
+| `delete_intern` | 删除实习生 | InternService::delete |
+| `batch_import` | 批量导入 | InternService::batch_import |
+| `update_intern_allocation` | 覆写 `allocation_status` 字段 | InternService::update_allocation |
+| `create_department` / `update_department` / `delete_department` | 科室增改删 | DepartmentService |
+| `create_system` / `update_system` / `delete_system` | 系统增改删 | DepartmentService |
+| `pre_allocate` | 预分配轮转（operator=系统） | RotationService::pre_allocate |
+| `adjust_rotation` | 手工调整单条 | RotationService::manual_adjust |
+| `confirm_allocation` | 确认分配 | RotationService::confirm_allocation |
+| `reset_allocation` | 重置预分配（仅 pre_alloc+未开始） | RotationService::reset_allocation |
+| `clean_all_rotation` | 清空全部轮转并重新预分配 | RotationService::clean_all_and_repreallocate |
+| `allocate_for_one_intern` | 单实习生预分配 | RotationService::allocate_for_one_intern |
+| `auto_archive` | 自动归档（operator=系统） | ArchiveService::auto_archive |
+| `restore_archive` | 撤销归档 | ArchiveService::restore_from_archive |
+
+详见 [reference/status-enums.md § 3](./reference/status-enums.md)。
 
 ### 6.2 操作者字段
 

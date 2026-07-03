@@ -1,6 +1,8 @@
 # 06 · 前端页面详解
 
-> 9 个路由页面的职责、内部状态、关键交互、所调用的 hook 和 Tauri 命令。
+> 10 个路由页面的职责、内部状态、关键交互、所调用的 hook 和 Tauri 命令。
+>
+> **最近更新：2026-07-03** — 路由命名 `/interns-overview`（不再叫 `/rotation-overview`，与 `Layout.tsx::pageTitles` 一致）；增加「轮转总览」左右窗口/月度滚动逻辑说明（`VIEW_WINDOW_SIZE=6`、`visibleInternRows` 过滤、`getFixedDeptMonthlyRotation` 虚拟分配）。
 
 ## 页面路由总览
 
@@ -10,7 +12,7 @@
 | `/archived` | `pages/ArchivedInterns.tsx` | 归档列表 |
 | `/departments` | `pages/DepartmentMgmt.tsx` | 科室管理 |
 | `/rotation` | `pages/RotationAllocation.tsx` | 轮转分配 |
-| `/rotation-overview` | `pages/RotationOverview.tsx` | 轮转总览 |
+| `/interns-overview` | `pages/RotationOverview.tsx` | 实习总览 |
 | `/interns/:id` | `pages/InternDetailPage.tsx` | （动态标题） |
 | `/history` | `pages/HistorySearch.tsx` | 信息检索 |
 | `/reports` | `pages/Reports.tsx` | 报表导出 |
@@ -182,18 +184,68 @@ const handlePreAllocate = () => {
 
 ### 数据
 
-- `useAllCurrentRotation`
-- `useInterns` （`status` 不传，取全部以补全班级与开始日期）
+- `useAllCurrentRotation`：gantt 内容
+- `useInterns("active")`：**r-fix 后**改从「当前实习」取所有实习生（r15 修复：不再依赖 `rotations` 是否为空）
+- `useDepartments`：解析固定科室 ID → 科室名 + 系统名
 
 ### 视图
 
 - 左栏：实习生列表（可搜索）
-- 右栏：横向甘特图
+- 右栏：横向甘特图（6 月窗口可左右翻）
   - 列：所有出现的自然月（`YYYY-MM` 集合）
-  - 行：每个实习生
+  - 行：实习总览左侧栏展示
   - 单元格：所在科室 + 起止日期 tooltip
   - 过去月份的单元格灰色「锁定」圆点
 - 联动选中态：左栏 hover/点击与右栏高亮同步（`highlightedIntern` state）
+
+### 视图窗口（2026-07-03 修复）
+
+- `VIEW_WINDOW_SIZE = 6` 月
+- `viewMonthKeys` = `[leftMonth, leftMonth+1, ..., leftMonth+5]`
+- 用户可点击上页/下页翻动 + 回到当前月（`goFirstMonth`）+ 跳到数据末月（`goLastDataMonth`）
+- `canGoPrev / canGoNext` 默认 `true`：允许任意左右滑动到历史与未来
+
+### 实习总览左侧可见集合：`visibleInternRows`（r-fix 修复）
+
+v1.0.0 修复两个可见性问题：
+
+1. **轮转型实习生**必须至少有一条 `confirmed/completed` 行；
+2. **固定科室实习生**则还需其实习区间 `[start, start+durationMonths)` 与视图窗口 `[viewMonthKeys[0], viewMonthKeys[末]+1月)` 有重叠。
+
+```typescript
+// 关键过滤逻辑
+const visibleInternRows = filteredInternRows.filter((row) => {
+  if (row.fixedDepartmentId) {
+    // 固定科室实习生:仅在实习区间与视图窗口重叠时展示
+    if (!row.startDate || !row.durationMonths) return false;
+    // overlap check: start < viewEnd && end > viewStart
+    return s < vE && e > vS;
+  }
+  // 轮转型:必须有至少一条 confirmed/completed 且落在视图窗口内
+  const statuses = internRotationStatusMap.get(row.internId);
+  if (!statuses) return false;
+  if (!statuses.has("confirmed") && !statuses.has("completed")) return false;
+  // 必须落在视图区间
+  const rotMap = internRotationMap.get(row.internId);
+  for (const mk of viewMonthKeys) {
+    if (rotMap?.has(mk)) return true;
+  }
+  return false;
+});
+```
+
+### 固定科室虚拟轮转：`getFixedDeptMonthlyRotation`（2026-07-03 新增）
+
+固定科室实习生没有后端 `rotation_assignments` 行（从前端 `useAllCurrentRotation` 取不到）。该函数为每个月份虚拟生成一份「在固定科室」的 RotationWithNames，仅当 `mk` 落在实习区间时返回：
+
+```typescript
+function getFixedDeptMonthlyRotation(row, mk): RotationWithNames | null {
+  if (!row.fixedDepartmentId || !row.fixedDeptName) return null;
+  if (!row.startDate) return null;
+  // mkDate 落在区间 [baseStart, baseStart + durationMonths)
+  // ... 返回虚拟对象 status='fixed' / id=`fixed-dept-{internId}-{mk}`
+}
+```
 
 ### 关键派生逻辑
 
@@ -206,10 +258,7 @@ const rotationStart = useMemo(() => {
   }, null);
 }, [rotations]);
 
-const allMonthKeys = useMemo(() => {
-  // 从所有 rotation.start_date 解析 YYYY-MM
-  // 若 start_date 缺失, 基于 rotationStart + month_index 推算
-}, [rotations, rotationStart]);
+const dataMonthKeys = useMemo(() => { /* ... 收集出现的 YYYY-MM ... */ }, [rotations]);
 
 const internRotationMap = useMemo(() => {
   // internId -> Map<monthKey, RotationWithNames>
@@ -219,16 +268,16 @@ const internRotationMap = useMemo(() => {
 ### 配色
 
 ```typescript
-const colorPalette = {
-  indigo: { bar: '...', text: '...', badge: '...' },
-  rose: { ... },
-  amber: ..., emerald: ..., violet: ..., cyan: ..., orange: ..., teal: ...
-};
+const colorPalette = { /* indigo, rose, amber, emerald, violet, cyan, orange, teal 各含 bar/text/badge/barStrong/shadow/glow/lockedDot/headerAccent */ };
 const systemColorLookup = { "内科": "indigo", "外科": "rose" };
-function getColor(systemName) {
-  const key = systemColorLookup[systemName] ||
-    colorNames[hash(systemName) % colorNames.length];
-  return colorPalette[key];
+const systemIconLookup = {
+  "内科": Stethoscope, "外科": Activity, "妇产科": Baby, "儿科": Baby,
+  "眼科": Eye, "骨科": Bone, "神经科": Brain, "心内科": Heart,
+  "肿瘤科": Pill, "影像科": Microscope, "口腔科": Pill, "ICU": Syringe,
+  "急诊科": Activity, "检验科": Microscope, "药剂科": Pill,
+};
+function getDeptEmoji(systemName, deptName) {
+  // 包含 emoji 兜底映射,纯文本视觉强化
 }
 ```
 

@@ -1,6 +1,8 @@
 # 09 · 安全与陷阱
 
 > 项目中已落实的安全约束、需要注意的数据陷阱、以及变更前后的兼容性检查。
+>
+> **最近更新：2026-07-03** — `delete_all_prealloc` 现在**仅** 删除 `status='pre_alloc'` 行；`reset_allocation` 增加 `start_date >= 今日` 过滤；`clean_all_and_repreallocate` 提供"全表（含已确认）清空"备用路径；前端 `useUpdateIntern` 现在 invalidate + refetch 双刷（详情页可见性修复）。
 
 ## 1. 安全机制一览
 
@@ -64,30 +66,36 @@ conn.execute("DELETE FROM interns WHERE id=?1", params![id])?;
 
 ## 3. 行为陷阱
 
-### 3.1 `pre_allocate_rotation` 不可逆
+### 3.1 `pre_allocate_rotation` 与 `delete_all_prealloc` 的范围
 
 ```sql
-DELETE FROM rotation_assignments;  -- 全表先清空（仅删除 pre_alloc 状态外的预分配会保留实际数据吗？）
+DELETE FROM rotation_assignments WHERE status='pre_alloc';
 ```
 
-> 注意：当前实现是**全表删除**，不会区分 `status='pre_alloc'` 与 `='confirmed'`。confirm 后再 pre_allocate 会把已确认记录也清空。
->
-> **界面约束**：用户在确认分配后不能一键重新预分配，需要手动 reset. 但 `reset_allocation` 命令也只是清空预分配。
+> 修复早期隐患：`delete_all_prealloc` 仅删除 `status='pre_alloc'` 行 —— 保护已确认的历史。
+> `pre_allocate` 内部逻辑：先 `delete_all_prealloc` → 因只 impact pre_alloc，`confirmed/completed` 历史仍保留。
 
-修改建议：把 `delete_all_prealloc()` 改成仅删除 `status='pre_alloc'`：
+### 3.1.1 `reset_allocation` 的保护（r14）
 
-```rust
-pub fn delete_all_prealloc(conn: &Connection) -> Result<(), AppError> {
-    conn.execute("DELETE FROM rotation_assignments WHERE status='pre_alloc'", [])?;
-    Ok(())
-}
+```sql
+DELETE FROM rotation_assignments
+WHERE status='pre_alloc'
+  AND (start_date IS NULL OR substr(start_date, 1, 10) >= ?1)
 ```
 
-### 3.2 容量在 P4 阶段可能超额
+> 仅删「未确认 且 未开始」的轮转记录；保护已确认与已开始的档案。若确需清空全部（含 confirmed），请用 `clean_all_and_repreallocate_rotation` —— 二次二次确认 + 写 `clean_all_rotation` 日志。
 
-四级回退 → P4：「任何有剩余容量的科室（允许重复）」。
-当所有科室都已满，才会真正发生超额（出现在最坏情况下）。
+### 3.2 容量在 P5 阶段可能超额
+
+5 级回退 → P5：「任何有剩余容量的科室（允许重复）」仅在旋转系统内查；最坏情况仍可能出现超额。
 手工调整在确认前应当再次目视检查。
+
+P1-P5 优先级（务必保留）：
+1. 不同系统 + 未访问 + 容量
+2. 不同系统 + 未访问（允许超额）
+3. 同上月系统 + 未访问
+4. 仅轮转系统 + 未访问 + 容量（f22）：跳过 fixed 科室
+5. 任何有剩余容量的科室（允许重复）
 
 ### 3.3 `month_index` 是 1-based
 
@@ -107,6 +115,9 @@ pub fn delete_all_prealloc(conn: &Connection) -> Result<(), AppError> {
 - Intern 表的外键，可空
 - 仅当系统 `is_rotation=false` 时该字段才有用
 - 切换 InternForm 的轮转类型为「轮转」时，前端会显式清空 `fixed_department_id`
+- **r-f22 联动**：后端 `InternService::update` 检测到 `fixed_department_id` 切换时：
+  - 同步删除该实习生全部 rotation 行
+  - 强制 `allocation_status = 'confirmed'`（fixed 设入）或 `'ready'`（fixed 清空）
 
 ## 4. 升级与兼容性
 
@@ -162,9 +173,8 @@ sqlite> SELECT * FROM rotation_assignments WHERE intern_id='xxx';
 | 位置 | 描述 |
 | --- | --- |
 | `scripts/` | 当前基本为空，预留给构建增强脚本 |
-| `tauri-plugin-shell` / `process` / `updater` | 在 `Cargo.toml` 声明但未注册，后续可加自动更新 |
-| 删除逻辑 | 见 3.1，pre_allocate 全表删除应是仅删 pre_alloc |
-| `RotationService` 未 `delete_all_prealloc` 应匹配 status | 见前 |
+| 删除逻辑（已修） | `delete_all_prealloc` 现已修：仅删 `status='pre_alloc'`（见 §3.1） |
+| `RotationService::reset_allocation`（已修） | 现已加 `start_date >= 今日` 过滤（见 §3.1.1） |
 | `src/services/archive_service.rs` | `auto_archive` 在循环里多次调用 `update` + `update_status`，未走事务 |
 | 日志表分页 | `LogService` 用 OFFSET 分页，数据量大时性能下降 |
 
@@ -194,3 +204,22 @@ sqlite> SELECT * FROM rotation_assignments WHERE intern_id='xxx';
 - [ ] `LogDao.find_by_type` 与 `find_all` 用 prepared statement cache
 - [ ] 对于「轮转总览」大表渲染使用虚拟滚动
 - [ ] 给 React Query 的 `defaultOptions` 加 `gcTime`
+
+## 12. v1.0.0 累计修复（与 MEMORY 同步）
+
+| 类别 | 修复 |
+| --- | --- |
+| UI | 实习总览表头布局优化（姓名列宽、科室名无背景纯描边） |
+| UI | 实习总览区间过滤：`visibleInternRows` 仅展示有分配的学生 |
+| 固定科室 | 每月虚拟轮转计划：`getFixedDeptMonthlyRotation` |
+| 后端 | `useUpdateIntern` `invalidateQueries` 双刷修复 |
+| 后端 | `delete_all_prealloc` 仅删 `status='pre_alloc'` |
+| 后端 | `reset_allocation` 加 `start_date >= 今日` 过滤 |
+| 后端 | `pre_allocate` 仅作用于 `allocation_status='ready'` 实习生 |
+| 后端 | 4 态分配状态派生 + startup `migration_recompute_done` 一次升级 |
+| 数据库 | `fixed_department_id` 切换联动清理 rotation（r-f22） |
+| 数据库 | `clear_invalid_fixed_dept` 防 FOREIGN KEY 失败 |
+| 构建 | 删除 PDF 嵌入字体（安装包 11.65MB → 2.65MB） |
+| 构建 | Cargo release profile 调优（lto/codegen-units/strip/opt-level/panic） |
+| 构建 | 删除冗余前端依赖（@radix-ui/zod/dnd-kit 等） |
+| CI | GitHub Actions：targets = `nsis` + `deb` + `appimage` |
