@@ -1,14 +1,13 @@
 # 实习生管理系统 — 跨平台构建 CI (使用官方 tauri-action)
 #
-# 触发方式:
-#   - 推送带 v* 格式的 tag (例 v1.0.0) → 自动构建+发布 GitHub Release(全平台产物)
-#   - 手动 workflow_dispatch
-#   - 向 main 分支 push(只上传 Artifacts,不发布 Release)
+# 触发:
+#   - push tag v*     → 全平台构建 + Auto Draft Release
+#   - workflow_dispatch → 全平台构建 + (draft | publish) Release
+#   - push main       → 全平台构建, 仅 Artifacts (不发 Release)
 #
 # 产物:
-#   - Windows: NSIS 安装包 (.exe)
-#   - Linux:   .deb (x86_64)
-#   Tag 推送时会自动追加到 GitHub Release 页面; 普通 push 只在 Actions 的 Artifacts 区域。
+#   - Windows: NSIS (.exe)
+#   - Linux:   .deb / .AppImage
 
 name: Build
 
@@ -22,9 +21,18 @@ on:
       - "README.md"
       - ".gitignore"
   workflow_dispatch:
+    inputs:
+      release_edition:
+        description: "发布形式 (仅对 tag 触发 + dispatch, main push 不发)"
+        required: false
+        default: draft
+        type: choice
+        options:
+          - draft
+          - publish
 
 permissions:
-  contents: write   # 创建 Release 需要
+  contents: write
 
 jobs:
   build:
@@ -40,18 +48,34 @@ jobs:
             args: ""
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      # 用官方 tauri-action,内部一站式安装 Node / Rust / 系统依赖 / 执行 build
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install npm deps
+        run: npm ci
+        if: github.event_name != 'pull_request'
+
+      - name: Build frontend
+        run: npm run build
+        if: github.event_name != 'pull_request'
+
+      # 单一步, 根据触发类型决定是否发 release
       - name: Build & bundle (Tauri)
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          # tag 推送时打 tagName 形如 v1.2.3,否则留空 (只生成 Artifacts)
+          # tag → 用 tag 名字; main push → 空 (action 不发 release, 只生成 artifacts)
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           releaseName: "实习生管理系统 ${{ github.ref_name }}"
           releaseBody: "自动发布:Windows NSIS 安装包 + Linux .deb / AppImage"
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+          projectPath: .
