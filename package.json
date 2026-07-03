@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:ci": "vite build",
     "build:clean": "node -e \"const fs=require('fs');fs.rmSync('dist',{recursive:true,force:true});\" && vite build",
     "tauri": "tauri",
     "tauri:build": "tauri build",

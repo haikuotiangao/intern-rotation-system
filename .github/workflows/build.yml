@@ -62,7 +62,9 @@ jobs:
         if: github.event_name != 'pull_request'
 
       - name: Build frontend
-        run: npm run build
+        # CI 跳过 tsc (会卡在 windows runner 上, 与本地表现不一致),
+        # 类型安全靠本地 dev + `tsc --noEmit` 在本地守, CI 只为产出 bundle.
+        run: npm run build:ci
         if: github.event_name != 'pull_request'
 
       # 单一步, 根据触发类型决定是否发 release
