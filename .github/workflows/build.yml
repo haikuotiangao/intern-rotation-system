@@ -55,11 +55,15 @@ jobs:
           node-version: 22
 
       - name: Install npm deps
+        shell: bash
         run: npm ci
 
       - name: Build frontend
         # CI 跳过 tsc 类型检查 (本地 dev 周期 + 手动 'npx tsc --noEmit' 守),
         # 减少 GitHub Actions windows runner 上冷启动的不可预期失败。
+        # 显式 shell: bash, 在 windows runner 上 GitHub Actions 偶尔会
+        # default 到 pwsh, 生产无声失败。
+        shell: bash
         # set -x 打印每一条执行的命令行, 保证失败原因暴露在 stderr。
         run: |
           set -x
