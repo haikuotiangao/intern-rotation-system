@@ -55,7 +55,9 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # 显式锁 Node 22 (LTS), 避开 GitHub 2025-09 起把 Node 20 runner
+          # 强行升 Node 24 所引发的 ABI/npm cache 警告。
+          node-version: 22
 
       - name: Install npm deps
         run: npm ci
@@ -63,7 +65,16 @@ jobs:
       - name: Build frontend
         # CI 跳过 tsc 类型检查 (本地 dev 周期 + 手动 'npx tsc --noEmit' 守),
         # 减少 GitHub Actions windows runner 上冷启动的不可预期失败。
-        run: npm run build:ci
+        # 2>&1 | tee 强制把 stderr 也上屏, 失败时便于排错。
+        run: |
+          echo "NODE=$(node -v)"
+          echo "NPM=$(npm -v)"
+          echo "PWD=$(pwd)"
+          ls node_modules/.bin/vite 2>&1 || echo "(vite 不在 .bin 里)"
+          npm run build:ci 2>&1 | tee frontend-build.log
+          rc=${PIPESTATUS[0]}
+          echo "::notice::build:ci exit=$rc"
+          exit $rc
 
       - name: Install Linux system deps
         if: matrix.os == 'ubuntu-22.04'
