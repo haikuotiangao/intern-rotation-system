@@ -64,27 +64,31 @@ jobs:
         # 显式 shell: bash, 在 windows runner 上 GitHub Actions 偶尔会
         # default 到 pwsh, 生产无声失败。
         shell: bash
-        # set -x 打印每一条执行的命令行, 保证失败原因暴露在 stderr。
+        # set -x 打印每一条执行的命令行, 把 stderr/stdout 一起进
+        # GITHUB_STEP_SUMMARY, 这样即在 step log 里被截断仍能看到。
         run: |
-          set -x
-          echo "==DIAG=="
-          echo "NODE=$(node -v)"
-          echo "NPM_VERSION=$(npm -v)"
-          echo "CWD=$(pwd)"
-          echo "OS=$(uname -a 2>/dev/null || ver)"
-          ls -la node_modules/.bin/vite 2>&1 || echo "(vite bin missing)"
-          echo "==LINT=="
-          npx vite --version
-          echo "==TRY BUILD=="
-          set +x
+          {
+            echo "### Diag @ $(date -u +%FT%TZ)"
+            echo "node=$(node -v 2>&1 || echo missing)"
+            echo "npm=$(npm -v 2>&1 || echo missing)"
+            echo "cwd=$(pwd)"
+            echo "vite bin=$(ls -la node_modules/.bin/vite 2>&1 || echo missing)"
+            echo "---"
+          } >> "$GITHUB_STEP_SUMMARY"
+          set -o pipefail
           if npm run build:ci 2>&1 | tee frontend-build.log ; then
-            echo "OK"
+            echo "OK" >> "$GITHUB_STEP_SUMMARY"
           else
             rc=${PIPESTATUS[0]}
+            {
+              echo "### build:ci FAILED @ $(date -u +%FT%TZ) (exit=$rc)"
+              echo '```'
+              cat frontend-build.log 2>/dev/null || true
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            # stderr 同时也输出到 step log (通常情况下 - 但本次若被吞 summary 仍是 fallback)
             echo "::error::build:ci exit=$rc"
-            echo "::group::frontend-build.log"
-            cat frontend-build.log || true
-            echo "::endgroup::"
+            cat frontend-build.log >&2 || true
             exit $rc
           fi
 
