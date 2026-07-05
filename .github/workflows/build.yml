@@ -82,23 +82,41 @@ jobs:
           sudo apt-get install -y --no-install-recommends libsoup-3.0-dev \
             || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
 
-      - name: Install frontend deps
+      - name: Install frontend deps + build
+        # 显式分两步, 把前端构建和 tauri 构建分开诊断。
+        # CI 上 frontend npm run build:ci 在 GitHub runners 偶发 30s 内 exit 1,
+        # 之前都和 tauri 混在一步, 看不到 stderr。
         shell: bash
         run: |
           set -euxo pipefail
+          cd "$GITHUB_WORKSPACE"
+          echo "== Checkout dir: $(pwd) =="
+          ls -la
+          echo "== Install npm deps =="
           npm ci
           echo "node=$(node -v) npm=$(npm -v)"
+          echo "== Build frontend (vite only, no tsc) =="
+          if ! npm run build:ci > frontend-build.log 2>&1 ; then
+            echo "::error::frontend build failed; tail of log:"
+            tail -50 frontend-build.log >&2
+            exit 1
+          fi
+          echo "== Frontend artifacts =="
+          find dist -maxdepth 2 -type f | head -20
 
       - name: Build Tauri
+        # 不调用 beforeBuildCommand (空字符串), 只复用上面已构建的 dist/
         shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY: ""
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         run: |
           set -euxo pipefail
-          echo "== Build Tauri =="
+          cd "$GITHUB_WORKSPACE"
           echo "NODE=$(node -v) NPM=$(npm -v) CWD=$(pwd)"
-          # tauri.conf.json 的 beforeBuildCommand = 'npm run build:ci' (= vite build only, no tsc)
+          echo "== Pre-built frontend dist/ exists ? =="
+          ls dist/ | head -10
+          # 使用独立 --no-bundle 选项不存在的 tauri 2 — 我们直接 tauri build
           npx tauri build --bundles ${{ matrix.bundle }}
 
       - name: List built bundles (debug)
