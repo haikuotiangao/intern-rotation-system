@@ -95,14 +95,31 @@ jobs:
           echo "== Install npm deps =="
           npm ci
           echo "node=$(node -v) npm=$(npm -v)"
-          echo "== Build frontend (vite only, no tsc) =="
-          if ! npm run build:ci > frontend-build.log 2>&1 ; then
-            echo "::error::frontend build failed; tail of log:"
-            tail -50 frontend-build.log >&2
-            exit 1
+          echo "== Build frontend (using .bin/vite directly, no npm script wrapper) =="
+          # 直接调 node_modules/.bin/vite (避免 npm run 脚本层可能的 SIGPIPE/quiet 行为)
+          if ! ./node_modules/.bin/vite build 2>&1 | tee frontend-build.log ; then
+            rc=${PIPESTATUS[0]}
+            {
+              echo "### Frontend build FAILED @ $(date -u +%FT%TZ) (exit=$rc)"
+              echo '```'
+              cat frontend-build.log 2>/dev/null || true
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::frontend build failed; tail:"
+            tail -50 frontend-build.log
+            exit $rc
           fi
           echo "== Frontend artifacts =="
           find dist -maxdepth 2 -type f | head -20
+
+      - name: Upload frontend-build log on failure (for diagnostics)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build-log-${{ runner.os }}
+          path: frontend-build.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Build Tauri
         # 不调用 beforeBuildCommand (空字符串), 只复用上面已构建的 dist/
