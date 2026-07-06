@@ -184,8 +184,11 @@ jobs:
           body: |
             自动发布:Windows NSIS 安装包 + Linux .deb / AppImage。
             CI: ${{ github.workflow }} @ ${{ github.sha }}
-          draft: true
+          # 直接发布 (用户后续点 Publish 时, action 已挂完 assets).
+          draft: false
           prerelease: false
           files: release-assets/**/*
+          # 资产名覆盖: 默认是 'release-assets-Windows/bundle.zip' 这种
+          # 嵌套目录不合适. 我们通过 pattern 把 release-assets 顶层展开.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
