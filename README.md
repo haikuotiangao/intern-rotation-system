@@ -7,13 +7,42 @@
 | 项目属性 | 值 |
 | --- | --- |
 | 项目名称 | 实习生管理系统 (Intern Rotation System) |
-| 版本 | v1.0.0 |
+| 版本 | v1.1.0 |
 | 应用标识符 | `com.intern-rotation.system` |
 | 主技术栈 | **Tauri 2 + Rust + React 18 + TypeScript + Tailwind CSS + SQLite** |
-| 适用平台 | Windows 桌面（NSIS 安装包） |
-| 输出产物 | `output/实习生管理系统_1.0.0_x64-setup.exe` |
+| 适用平台 | Windows 10/11 (NSIS 安装包) · Linux x86_64 / arm64 (.deb + AppImage) |
+| 输出产物 | 跨平台自动发布（GitHub Releases）：Windows `.exe` / Linux `.deb` / Linux `.AppImage` |
 | 用户定位 | 老河口市第一医院（科教科 / 信息科） |
 | 文档目录 | `docs/` |
+
+## 安装包下载（v1.1.0+）
+
+所有平台的安装包都通过 GitHub Actions 跨平台构建，每个 tag 自动发布。**请按你机器的实际架构挑选下面对应资产**：
+
+| 平台 | 架构 | 安装包 | 典型场景 |
+| --- | --- | --- | --- |
+| Windows | x86_64 | `*_Windows_x86_64.exe` | 普通 Win 10/11 PC |
+| Windows | arm64 | `*_Windows_arm64.exe` | Surface Pro X / WoA |
+| Linux | x86_64 | `*_Linux_x86_64.deb` 或 `.AppImage` | Intel/AMD Linux |
+| Linux | arm64 | `*_Linux_arm64.deb` 或 `.AppImage` | 龙芯 / 飞腾 / 树莓派 等 ARM Linux |
+
+→ 下载链接：[**GitHub Releases › v1.1.0**](https://github.com/haikuotiangao/intern-rotation-system/releases/tag/v1.1.0)
+
+### Linux 安装指引
+
+- **Debian / Ubuntu** 系统：选 `.deb` 包，`sudo apt install ./xxx.deb`，自动处理依赖。
+- **Arch / Manjaro** 系统：**推荐用 AppImage**（自带 webkit 运行时，不依赖系统包）：
+  ```bash
+  # 安装运行所需基础库
+  sudo pacman -S --needed fuse2 libappindicator-gtk3 librsvg2
+
+  # 下载 + 运行
+  wget https://github.com/haikuotiangao/intern-rotation-system/releases/download/v1.1.0/_v1.1.0_Linux_arm64.AppImage
+  chmod +x _v1.1.0_Linux_arm64.AppImage
+  ./_v1.1.0_Linux_arm64.AppImage
+  ```
+- Tauri 应用运行需要 `libwebkit2gtk-4.1-0` 与 `libgtk-3-0`，AppImage 自带不依赖系统；用 `.deb` 时 distro 仓库缺这俩 webkit 包会出现 "依赖关系不满足：libwebkit2gtk-4.1-0"。
+
 
 ## 核心价值
 
