@@ -1,20 +1,31 @@
 # 实习生管理系统 — 跨平台构建 & 发版
 #
-# 学习自 farion1231/cc-switch release.yml 的成熟模式：
-#   - matrix 仅 build (不发布)；publish-release 是独立 job
-#   - 各平台 runner 用 pnpm tauri build (我们用 npm tauri build, 同理)
-#   - Prepare assets 阶段, 把 bundle 改名统一为 release-assets/
-#   - Publish Release 是 ubuntu 上跑 collect-all-artifacts -> softprops/action-gh-release
-#   - concurrency 控制, 避免同 tag 多次 push 造成 outlier run
+# 参考 farion1231/cc-switch release.yml 的成熟模式：
+#   - matrix 仅 build, publish-release 是独立 job
+#   - 矩阵内多 OS + 多 ARCH 自由组合 (windows x64/arm64, linux x64/arm64)
+#   - Tauri 2 build CLI 直接调用 (我们用 npm tauri build, 不用 pnpm)
+#   - 每个 matrix cell 自己 prepare assets 进入 release-assets/<os>-<arch>/
+#   - publish-release 跨所有 matrix cell collect, 用 softprops/action-gh-release@v2 一把发
+#   - concurrency 控制, 同 tag 多次 push 不会 missp
 #
 # 触发:
-#   - push tag v*       → 跨平台 build + publish Release (Draft)
-#   - workflow_dispatch → 仅 build + upload Artifacts
-#   - push main          → 仅 build + upload Artifacts
+#   - push tag v*       → 跨平台 build + 自动 publish Release
+#   - workflow_dispatch → 仅 build + 上传 workflow Artifacts
+#   - push main          → 仅 build + 上传 workflow Artifacts
 #
-# 产物:
-#   - Windows NSIS .exe
-#   - Linux .deb + .AppImage
+# 产物 (v1.0.x 起):
+#   - Windows x86_64  NSIS installer (.exe)
+#   - Windows arm64   NSIS installer (.exe)   (Microsoft Surface Pro X / WoA)
+#   - Linux x86_64    .deb + AppImage
+#   - Linux arm64     .deb + AppImage          (aarch64 龙芯/RPi/...)
+#
+# 资产命名规范:
+#   实习生管理系统_v1.0.0_Windows_x86_64.exe
+#   实习生管理系统_v1.0.0_Windows_arm64.exe
+#   实习生管理系统_v1.0.0_Linux_x86_64.deb
+#   实习生管理系统_v1.0.0_Linux_x86_64.AppImage
+#   实习生管理系统_v1.0.0_Linux_arm64.deb
+#   实习生管理系统_v1.0.0_Linux_arm64.AppImage
 
 name: release
 
@@ -40,16 +51,28 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - label: Windows NSIS
+          # ──────────── Windows ────────────
+          - label: Windows NSIS x86_64
             os: windows-latest
+            target: ""
             bundle: nsis
-            asset_glob: src-tauri/target/release/bundle/nsis/*.exe
-          - label: Linux (deb + AppImage)
+            arch: x86_64
+          - label: Windows NSIS arm64
+            os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            bundle: nsis
+            arch: arm64
+          # ──────────── Linux ────────────
+          - label: Linux deb+AppImage x86_64
             os: ubuntu-22.04
+            target: ""
             bundle: appimage,deb
-            asset_glob: |
-              src-tauri/target/release/bundle/deb/*.deb
-              src-tauri/target/release/bundle/appimage/*.AppImage
+            arch: x86_64
+          - label: Linux deb+AppImage arm64
+            os: ubuntu-22.04-arm
+            target: ""
+            bundle: appimage,deb
+            arch: arm64
 
     steps:
       - name: Checkout
@@ -58,11 +81,16 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          # 锁 LTS 22 (避开 GitHub 2025-09 起把 Node 20 → 24 强转的 ABI 警告)
           node-version: "22"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Add Windows ARM64 target
+        # aarch64-pc-windows-msvc 不是 stable 默认 target, 需 rustup target add
+        if: matrix.os == 'windows-11-arm'
+        shell: bash
+        run: rustup target add aarch64-pc-windows-msvc
 
       - name: Install Linux system deps
         if: runner.os == 'Linux'
@@ -76,16 +104,14 @@ jobs:
             libgtk-3-dev \
             librsvg2-dev \
             libayatana-appindicator3-dev
-          # webkit 版本兼容: GitHub 各 ubuntu image 任选其一
+          # webkit/soup 主备兼容 (GitHub 各 ubuntu image 版本不一)
           sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
             || sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.0-dev
           sudo apt-get install -y --no-install-recommends libsoup-3.0-dev \
             || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
 
       - name: Install frontend deps + build
-        # 显式分两步, 把前端构建和 tauri 构建分开诊断。
-        # CI 上 frontend npm run build:ci 在 GitHub runners 偶发 30s 内 exit 1,
-        # 之前都和 tauri 混在一步, 看不到 stderr。
+        # 显式分两步, 把前端构建和 tauri 构建分开诊断
         shell: bash
         run: |
           set -euxo pipefail
@@ -95,8 +121,7 @@ jobs:
           echo "== Install npm deps =="
           npm ci
           echo "node=$(node -v) npm=$(npm -v)"
-          echo "== Build frontend (using .bin/vite directly, no npm script wrapper) =="
-          # 直接调 node_modules/.bin/vite (避免 npm run 脚本层可能的 SIGPIPE/quiet 行为)
+          echo "== Build frontend =="
           if ! ./node_modules/.bin/vite build 2>&1 | tee frontend-build.log ; then
             rc=${PIPESTATUS[0]}
             {
@@ -116,13 +141,12 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: frontend-build-log-${{ runner.os }}
+          name: frontend-build-log-${{ matrix.label }}
           path: frontend-build.log
           if-no-files-found: ignore
           retention-days: 7
 
       - name: Build Tauri
-        # 不调用 beforeBuildCommand (空字符串), 只复用上面已构建的 dist/
         shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY: ""
@@ -131,25 +155,89 @@ jobs:
           set -euxo pipefail
           cd "$GITHUB_WORKSPACE"
           echo "NODE=$(node -v) NPM=$(npm -v) CWD=$(pwd)"
-          echo "== Pre-built frontend dist/ exists ? =="
           ls dist/ | head -10
-          # 使用独立 --no-bundle 选项不存在的 tauri 2 — 我们直接 tauri build
-          npx tauri build --bundles ${{ matrix.bundle }}
+          # 用 matrix.target / matrix.bundle 控制目标 + bundle
+          if [ -n "${{ matrix.target }}" ]; then
+            npx tauri build --target "${{ matrix.target }}" --bundles ${{ matrix.bundle }}
+          else
+            npx tauri build --bundles ${{ matrix.bundle }}
+          fi
 
       - name: List built bundles (debug)
         if: always()
         shell: bash
         run: |
           echo "== Bundle dir list =="
-          find src-tauri/target -maxdepth 5 -type f \( -name "*.exe" -o -name "*.deb" -o -name "*.AppImage" \) 2>/dev/null || true
-          echo "== artifacts dir =="
+          find src-tauri/target -maxdepth 5 -type f \
+            \( -name "*.exe" -o -name "*.deb" -o -name "*.AppImage" \) 2>/dev/null || true
 
-      - name: Upload built bundles as workflow artifacts
-        if: success()
+      - name: Prepare Release Assets (rename + unify)
+        # 把 tauri 原始产物重新命名为 release-assets/Linux-arm64/ 之类,
+        # 所有矩阵 cell 命名一致以便 publish-release 合并后不冲突
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "$GITHUB_WORKSPACE"
+          VERSION="${GITHUB_REF_NAME:-dev}"
+          # 去除 'v' 前缀
+          VERSION_NUM="${VERSION#v}"
+          ARCH="${{ matrix.arch }}"
+          # 选目录: 以 runner 信息决定 Windows 还是 Linux
+          case "${{ runner.os }}" in
+            Windows)  PLATFORM="Windows" ;;
+            Linux)    PLATFORM="Linux"   ;;
+            macOS)    PLATFORM="macOS"   ;;
+            *)        PLATFORM="${{ runner.os }}" ;;
+          esac
+          OUTDIR="release-assets/${PLATFORM}-${ARCH}"
+          mkdir -p "$OUTDIR"
+          echo "OUTDIR=$OUTDIR PLATFORM=$PLATFORM ARCH=$ARCH VERSION=$VERSION_NUM"
+
+          # 收集 tauri 产物 (Windows 在 bundle/<bundle>, Linux 同上)
+          shopt -s nullglob
+          for phase in \
+            "src-tauri/target/aarch64-pc-windows-msvc/release/bundle" \
+            "src-tauri/target/x86_64-pc-windows-msvc/release/bundle" \
+            "src-tauri/target/release/bundle"
+          do
+            [ -d "$phase" ] || continue
+            find "$phase" -mindepth 1 -maxdepth 4 -type f \
+              \( -name "*.exe" -o -name "*.deb" -o -name "*.AppImage" -o -name "*.rpm" \) -print0 \
+              | while IFS= read -r -d '' f; do
+                  ext="${f##*.}"
+                  # 将 .AppImage 归一化
+                  ext_norm="$(echo "$ext" | tr '[:upper:]' '[:lower:]')"
+                  base="实习生管理系统_v${VERSION_NUM}_${PLATFORM}_${ARCH}"
+                  if [ "$ext_norm" = "appimage" ]; then
+                    newname="${base}.${ext_norm^}"
+                    # .AppImage (本地源是 .AppImage)
+                    cp "$f" "$OUTDIR/${base}.AppImage"
+                  else
+                    cp "$f" "$OUTDIR/${base}.${ext_norm}"
+                  fi
+                done
+          done
+
+          echo "== Prepared release assets in $OUTDIR =="
+          ls -la "$OUTDIR" || true
+
+      - name: Verify release assets produced
+        if: always()
+        shell: bash
+        run: |
+          echo "== release-assets tree =="
+          find release-assets -type f 2>/dev/null || true
+          if [ -z "$(find release-assets -type f 2>/dev/null)" ]; then
+            echo "::error::release-assets is empty for ${{ matrix.label }}"
+            exit 1
+          fi
+
+      - name: Upload release-assets as workflow artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bundle-${{ runner.os }}
-          path: ${{ matrix.asset_glob }}
+          name: release-assets-${{ runner.os }}-${{ matrix.arch }}
+          path: release-assets/
           if-no-files-found: error
           retention-days: 14
 
@@ -163,15 +251,15 @@ jobs:
       - name: Download all built bundles
         uses: actions/download-artifact@v4
         with:
-          pattern: bundle-*
+          pattern: release-assets-*
           path: release-assets
           merge-multiple: true
 
       - name: Verify collected assets
         run: |
           set -euxo pipefail
-          ls -la release-assets
-          if [ -z "$(ls -A release-assets)" ]; then
+          ls -laR release-assets
+          if [ -z "$(find release-assets -type f 2>/dev/null)" ]; then
             echo "::error::no bundle artifacts collected"
             exit 1
           fi
@@ -184,11 +272,19 @@ jobs:
           body: |
             自动发布:Windows NSIS 安装包 + Linux .deb / AppImage。
             CI: ${{ github.workflow }} @ ${{ github.sha }}
-          # 直接发布 (用户后续点 Publish 时, action 已挂完 assets).
+
+            ## 安装包架构表
+
+            | 平台 | 架构 | 安装包 |
+            | --- | --- | --- |
+            | Windows | x86_64 | `实习生管理系统_v${{ github.ref_name }}_Windows_x86_64.exe` |
+            | Windows | arm64  | `实习生管理系统_v${{ github.ref_name }}_Windows_arm64.exe` (Surface Pro X / WoA) |
+            | Linux   | x86_64 | `实习生管理系统_v${{ github.ref_name }}_Linux_x86_64.deb` / `.AppImage` |
+            | Linux   | arm64  | `实习生管理系统_v${{ github.ref_name }}_Linux_arm64.deb` / `.AppImage` |
+
+            请按你的机器架构选择对应安装包。
           draft: false
           prerelease: false
           files: release-assets/**/*
-          # 资产名覆盖: 默认是 'release-assets-Windows/bundle.zip' 这种
-          # 嵌套目录不合适. 我们通过 pattern 把 release-assets 顶层展开.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
