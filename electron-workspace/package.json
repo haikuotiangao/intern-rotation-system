@@ -1,0 +1,52 @@
+{
+  "name": "intern-rotation-electron",
+  "version": "1.0.0-win7",
+  "description": "Win7 legacy flavor of Intern Rotation System, forked off the Tauri 2 main app. Built with Electron 22.x (the last Electron line that supports Windows 7 SP1).",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "pack": "electron-builder --dir",
+    "dist:win7": "electron-builder --win nsis portable --x64",
+    "postinstall": "echo Skipped Electron 22 build (this is a scaffold stub, see docs/WIN7-LEGACY.md)"
+  },
+  "dependencies": {
+    "better-sqlite3": "^8.4.0"
+  },
+  "devDependencies": {
+    "electron": "^22.3.27",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.intern-rotation.system.win7",
+    "productName": "实习生管理系统 Win7",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ],
+      "artifactName": "${productName}_v${version}_${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "实习生管理系统"
+    },
+    "portable": {
+      "artifactName": "${productName}_v${version}_${arch}_portable.${ext}"
+    }
+  }
+}
