@@ -1,19 +1,15 @@
 {
   "name": "intern-rotation-electron",
   "version": "1.0.0-win7",
-  "description": "Win7 legacy flavor of Intern Rotation System, forked off the Tauri 2 main app. Built with Electron 22.x (the last Electron line that supports Windows 7 SP1).",
+  "description": "Win7 legacy flavor of Intern Rotation System. Built with Electron 22.x (the last Electron line that supports Windows 7 SP1). Pre-release alpha: backend services are stubs.",
   "private": true,
   "main": "main.js",
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
     "pack": "electron-builder --dir",
-    "dist:win7": "electron-builder --win nsis portable --x64",
-    "rebuild-sqlite": "electron-rebuild -f -w better-sqlite3",
-    "postinstall": "electron-builder install-app-deps"
-  },
-  "dependencies": {
-    "better-sqlite3": "^8.4.0"
+    "dist:win7": "electron-builder --win nsis portable --x64 --publish never",
+    "postinstall": "electron-builder install-app-deps || echo 'install-app-deps skipped'"
   },
   "devDependencies": {
     "@electron/rebuild": "^3.6.0",
@@ -30,13 +26,7 @@
       "main.js",
       "preload.js",
       "renderer/**/*",
-      "package.json",
-      "node_modules/better-sqlite3/**/*",
-      "node_modules/bindings/**/*",
-      "node_modules/file-uri-to-path/**/*"
-    ],
-    "asarUnpack": [
-      "node_modules/better-sqlite3/**/*"
+      "package.json"
     ],
     "win": {
       "target": [
