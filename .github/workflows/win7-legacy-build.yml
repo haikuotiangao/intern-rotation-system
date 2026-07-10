@@ -1,3 +1,24 @@
+# 实习生管理系统 — Win7 Legacy 专属构建 CI
+#
+# 这份 workflow 仅在 `feat/win7-legacy` 分支有效。它的目标是产出
+# 能在 **Windows 7 SP1 x64** 运行的安装包。
+#
+# 触发:
+#   - push tag v*-legacy7 (例 v1.0.0-legacy7)
+#   - workflow_dispatch (手动静态)
+#   - push 分支 feat/win7-legacy
+#
+# 产物:
+#   - NSIS  安装器: 实习生管理系统 Win7_v{x.y.z}_x64.exe
+#   - Portable .exe: 实习生管理系统 Win7_v{x.y.z}_x64_portable.exe
+#
+# 后端技术栈:
+#   - Electron 22 (最后支持 Win7 SP1 的 LTS Electron)
+#   - better-sqlite3 + electron-builder 24
+#   - Win7 SP1 兼容境: 需在 Win7 PC 装机前装 VC++ Redistributable 2015-2022 (x64)
+#
+# Build runner: windows-2022. (windows-2019 已废)
+
 name: release-win7-legacy
 
 on:
@@ -11,21 +32,118 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-win7-legacy-${{ github.ref_name || github.sha }}
+  cancel-in-progress: true
+
 jobs:
-  debug:
-    name: debug
+  build:
+    name: build-win7-x64
     runs-on: windows-2022
-    timeout-minutes: 10
+    timeout-minutes: 90
     steps:
-      - name: Print context
-        run: |
-          echo "event=${{ github.event_name }}"
-          echo "ref=${{ github.ref }}"
-          echo "ref_name=${{ github.ref_name }}"
-          echo "RunId=${{ github.run_id }}"
-      - name: Setup node
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: True
-        run: echo "yes"
+
+      - name: Build frontend (root)
+        shell: pwsh
+        run: |
+          if (Test-Path node_modules) { Remove-Item -Recurse -Force node_modules -ErrorAction SilentlyContinue }
+          if (Test-Path dist) { Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue }
+          npm ci --no-audit
+          npm run build
+
+      - name: Install electron-workspace deps
+        shell: pwsh
+        run: |
+          cd electron-workspace
+          if (Test-Path node_modules) { Remove-Item -Recurse -Force node_modules -ErrorAction SilentlyContinue }
+          npm install --no-audit
+          npx electron-builder install-app-deps
+
+      - name: Build & package (electron-builder NSIS + portable)
+        shell: pwsh
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: |
+          cd electron-workspace
+          npx electron-builder --win nsis portable --x64 --publish never
+          Write-Host "=== Build done ==="
+
+      - name: List release artifacts
+        shell: pwsh
+        if: always()
+        run: |
+          Write-Host "== electron-workspace/release contents =="
+          if (Test-Path electron-workspace/release) {
+            Get-ChildItem electron-workspace/release -Recurse | ForEach-Object {
+              $size = "{0:N2}" -f ($_.Length / 1MB)
+              Write-Host ("  {0} ({1} MB)" -f $_.FullName, $size)
+            }
+          } else {
+            Write-Host "  (no release dir)"
+          }
+
+      - name: Upload release artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: win7-legacy-release
+          path: electron-workspace/release/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') && endsWith(github.ref_name, '-legacy7')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Download win7 release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: win7-legacy-release
+          path: release-assets
+
+      - name: Verify
+        run: |
+          set -euxo pipefail
+          ls -laR release-assets
+          if [ -z "$(find release-assets -type f 2>/dev/null)" ]; then
+            echo "::error::no win7 artifacts collected"
+            exit 1
+          fi
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "实习生管理系统 Win7 Legacy ${{ github.ref_name }}"
+          body: |
+            ⚠️ **仅用于 Windows 7 SP1 (x64) 装机**。
+            Tauri 2 依赖 WebView2 runtime, Microsoft 不发布 Win7 版本, 所以走 Electron 22 (最后支持 Win7 SP1 的 Electron LTS)。
+            该产物 **Electron 22 已 EOL** — 强烈建议升级主机到 Win10/11 后使用 [主分支的跨平台 release](https://github.com/haikuotiangao/intern-rotation-system/releases) 。
+
+            ### 安装前环境依赖
+            1. **VC++ Redistributable 2015-2022 (x64)** — better-sqlite3 native 必需
+            2. **KB3033929** — Win7 SHA-256 patch
+            3. **KB4490628** — TLS 1.2 patch
+
+            ### 资产架构
+            | 形态 | 文件 | 备注 |
+            | --- | --- | --- |
+            | NSIS 安装包 | `实习生管理系统 Win7_v${VERSION}_x64.exe` | 推荐, 可装 / 卸 |
+            | portable .exe | `实习生管理系统 Win7_v${VERSION}_x64_portable.exe` | 不需装, 解压加载 |
+
+            业务逻辑与前端 UI 与 Tauri 主分支一致 — 装机顺序 = front + back 同步后续 跟主分支。
+          draft: false
+          prerelease: true
+          files: release-assets/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
