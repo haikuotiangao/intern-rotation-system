@@ -9,12 +9,14 @@
     "dev": "electron . --dev",
     "pack": "electron-builder --dir",
     "dist:win7": "electron-builder --win nsis portable --x64",
-    "postinstall": "echo Skipped Electron 22 build (this is a scaffold stub, see docs/WIN7-LEGACY.md)"
+    "rebuild-sqlite": "electron-rebuild -f -w better-sqlite3",
+    "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
     "better-sqlite3": "^8.4.0"
   },
   "devDependencies": {
+    "@electron/rebuild": "^3.6.0",
     "electron": "^22.3.27",
     "electron-builder": "^24.13.3"
   },
@@ -28,7 +30,13 @@
       "main.js",
       "preload.js",
       "renderer/**/*",
-      "package.json"
+      "package.json",
+      "node_modules/better-sqlite3/**/*",
+      "node_modules/bindings/**/*",
+      "node_modules/file-uri-to-path/**/*"
+    ],
+    "asarUnpack": [
+      "node_modules/better-sqlite3/**/*"
     ],
     "win": {
       "target": [

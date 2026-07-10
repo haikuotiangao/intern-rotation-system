@@ -7,3 +7,4 @@ src-tauri/target/
 _fix_temp.py
 .DS_Store
 *.pdb
+notes/
