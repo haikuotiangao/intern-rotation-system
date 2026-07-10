@@ -1,35 +1,27 @@
 // main.js — Electron 22 main process (Win7 legacy flavor)
 // ---------------------------------------------------------------------------
-// Phase 3.1: 提供主进程 + 全 surface IPC handlers (项目原 43 个 tauri command).
-// 本期仅 2 个 ipcMain.handle + 2 个 plugin 拦截 (dialog save / fs write_file),
-// 后端业务 (rotation_service / intern_service / ...) 还没搬运,
-// 实际走 "000 mock": 返回空/占位 result, 使 app 能 启动 + 前端能读 meal.
-// 这是讲崩点走位干净 -> 后期 一步 步加 ipc handler, 全程不需要动前端.
-//
-// (实际 phase 3.2n期 全面 business ipc handlers 都在这里 importer)
+// Phase 3.2: 43 ipcMain.handle wired to lib/ service modules. Business logic
+// floating on JSON file DB (lib/db.js). Front-end invokes the same name as the
+// original Tauri command - no src/ change required.
 
-// .......... user data 路径 (Win7 下为 %APPDATA%
-// ............%USERPROFILE%\AppData\Roaming\) ..........
 const { app, BrowserWindow, ipcMain, dialog } = require('electron')
 const path = require('path')
 const fs = require('fs')
 
-// Electron 22 + Win7: avoid spellcheck feature for stability
-app.commandLine.appendSwitch(
-  'disable-features',
-  'CalculatedMobileContentCapture,SpareRendererForSitePerProcess'
-)
+// Win7 features off
+app.commandLine.appendSwitch('disable-features', 'CalculatedMobileContentCapture,SpareRendererForSitePerProcess')
 
-// Alt path: appex userData 目录
+// Init db early - load + ensure settings
+require('./lib/db.js').load().catch(err => console.error(err))
+
 const USER_DATA_DIR = path.join(
   process.env.APPDATA || path.join(process.env.USERPROFILE || '', 'AppData', 'Roaming'),
   'intern-rotation-system'
 )
-try { fs.mkdirSync(USER_DATA_DIR, { recursive: true }) } catch (e) { /* ignore */ }
-try { app.setPath('userData', USER_DATA_DIR) } catch (e) { /* ignore */ }
+try { fs.mkdirSync(USER_DATA_DIR, { recursive: true }) } catch (e) {}
+try { app.setPath('userData', USER_DATA_DIR) } catch (e) {}
 
-// DB path in Win7: electron32性22 m 必须 + uber on Windows
-const DB_PATH = path.join(USER_DATA_DIR, 'data.db')
+const DB_PATH = path.join(USER_DATA_DIR, 'data.json')
 
 let mainWindow = null
 
@@ -49,7 +41,6 @@ function createWindow() {
     },
   })
 
-  // Tauri path: win 上 dist/index.html 为 React 入口
   const distIndex = path.resolve(__dirname, '..', 'dist', 'index.html')
   if (fs.existsSync(distIndex)) {
     mainWindow.loadFile(distIndex, { hash: '/legacy-electron22' }).catch((err) => {
@@ -68,8 +59,7 @@ function createWindow() {
 }
 
 // ---------------------------------------------------------------------------
-// IPC handlers: legacy:* 是 Win7 legacy 的未打包 plugin 代理
-// cmd → 在 ipcMain.handle(cmd) 里 一同 main 中表达 (React 代码 0 改)
+// legacy: dialog/fs plugin proxies
 // ---------------------------------------------------------------------------
 
 ipcMain.handle('legacy:dialog-show-save', async (_evt, options) => {
@@ -87,90 +77,104 @@ ipcMain.handle('legacy:dialog-show-save', async (_evt, options) => {
 })
 
 ipcMain.handle('legacy:fs-write-file', async (_evt, { filePath, bytes }) => {
-  // bytes 是 Uint8Array 转 Array.from 进来的
   if (!filePath) throw new Error('legacy:fs-write-file: filePath required')
-  const buf = Buffer.from(bytes || [])
-  await fs.promises.writeFile(filePath, buf)
+  await fs.promises.writeFile(filePath, Buffer.from(bytes || []))
   return true
 })
 
-ipcMain.handle('legacy:fs-read-text-file', async (_evt, { filePath, options }) => {
-  const opts = options || {}
+ipcMain.handle('legacy:fs-read-text-file', async (_evt, { filePath }) => {
   if (!filePath) throw new Error('legacy:fs-read-text-file: filePath required')
-  // Tauri read_text_file 同样 有: options 可能含 base64Config
   return fs.promises.readFile(filePath, 'utf8')
 })
 
 // ---------------------------------------------------------------------------
-// Tauri commands 注册区 · 本期仅 mock 货 (43 个 "000 返回")
-// 后期 Phase 3.2 逐步加真 ipcMain.handle
+// Load service modules
 // ---------------------------------------------------------------------------
-function mockReturn(cmd, defaultValue = null) {
-  ipcMain.handle(cmd, async () => {
-    // 老 Tauri 返回 null 或空数组或 0 (取决于返回值 type)
-    // 人家业务代码 mv; 现在返回空架子, 这每一个 call 会在 UI 中看到 '未加载'.
-    return defaultValue
+const intern = require('./lib/intern.js')
+const department = require('./lib/department.js')
+const rotation = require('./lib/rotation.js')
+const archive = require('./lib/archive.js')
+const auth = require('./lib/auth.js')
+const log = require('./lib/log.js')
+const report = require('./lib/report.js')
+
+// Wrap async ipcMain.handle
+function bind(cmd, handler) {
+  ipcMain.handle(cmd, async (_evt, ...args) => {
+    try {
+      return await handler(...args)
+    } catch (e) {
+      console.error(`[legacy-electron22] handler ${cmd} error:`, e.message)
+      throw e
+    }
   })
 }
 
 // intern_
-mockReturn('get_interns', [])
-mockReturn('get_intern', null)
-mockReturn('create_intern', {})
-mockReturn('update_intern', {})
-mockReturn('delete_intern', null)
-mockReturn('search_interns', [])
-mockReturn('batch_import_interns', 0)
-mockReturn('update_intern_allocation_status', null)
+bind('get_interns', async (status) => intern.findAll(status || null))
+bind('get_intern', async (id) => intern.findById(id))
+bind('create_intern', async (intern2, operator) => intern.create(intern2, operator))
+bind('update_intern', async (intern2, operator) => intern.update(intern2, operator))
+bind('update_intern_allocation_status', async (internId, allocation_status, operator) =>
+  intern.updateAlloction(internId, allocation_status, operator))
+bind('delete_intern', async (id, operator) => intern.delete_(id, operator))
+bind('search_interns', async (keyword, status) => intern.search(keyword, status || null))
+bind('batch_import_interns', async (internsArr, operator) =>
+  intern.batchImport(internsArr, operator || 'admin'))
 
 // department_
-mockReturn('get_department_systems', [])
-mockReturn('get_departments', [])
-mockReturn('create_department_system', {})
-mockReturn('update_department_system', {})
-mockReturn('delete_department_system', null)
-mockReturn('create_department', {})
-mockReturn('update_department', {})
-mockReturn('delete_department', null)
-mockReturn('get_total_capacity', { total: 0, used: 0 })
+bind('get_department_systems', async () => department.getSystems())
+bind('get_departments', async () => department.getDepartments())
+bind('create_department_system', async (system, operator) => department.createSystem(system, operator || 'admin'))
+bind('update_department_system', async (system, operator) => department.updateSystem(system, operator || 'admin'))
+bind('delete_department_system', async (id, operator) => department.deleteSystem(id, operator || 'admin'))
+bind('create_department', async (dept, operator) => department.createDept(dept, operator || 'admin'))
+bind('update_department', async (dept, operator) => department.updateDept(dept, operator || 'admin'))
+bind('delete_department', async (id, operator) => department.deleteDept(id, operator || 'admin'))
+bind('get_total_capacity', async () => department.getTotalCapacity())
 
 // rotation_
-mockReturn('pre_allocate_rotation', { count: 0 })
-mockReturn('get_rotation_by_intern', [])
-mockReturn('get_rotation_by_month', [])
-mockReturn('get_all_current_rotation', [])
-mockReturn('manual_adjust_rotation', null)
-mockReturn('confirm_allocation', null)
-mockReturn('reset_allocation', null)
-mockReturn('clean_all_and_repreallocate_rotation', { count: 0 })
-mockReturn('allocate_for_one_intern', null)
+bind('pre_allocate_rotation', async () => rotation.preAllocate())
+bind('get_rotation_by_intern', async (internId) => rotation.getByIntern(internId))
+bind('get_rotation_by_month', async (year, month) => rotation.getByMonth(year, month))
+bind('get_all_current_rotation', async () => rotation.getAllCurrent())
+bind('manual_adjust_rotation', async (internId, deptId, monthIndex, operator) =>
+  rotation.manualAdjust(internId, deptId, monthIndex, operator || 'admin'))
+bind('confirm_allocation', async (internId, operator) => rotation.confirmAllocation(internId, operator || 'admin'))
+bind('reset_allocation', async (operator) => rotation.resetAllocation(operator || 'admin'))
+bind('clean_all_and_repreallocate_rotation', async (operator) =>
+  rotation.cleanAllAndRepreallocate(operator || 'admin'))
+bind('allocate_for_one_intern', async (internId, operator) =>
+  rotation.allocateForOne(internId, operator || 'admin'))
 
 // archive_
-mockReturn('auto_archive', { count: 0 })
-mockReturn('restore_archive', null)
-mockReturn('get_archived_interns', [])
-mockReturn('search_archived_interns', [])
+bind('auto_archive', async () => archive.autoArchive(new Date().toISOString().slice(0, 10)))
+bind('restore_archive', async (internId, operator) => archive.restoreArchive(internId, operator || 'admin'))
+bind('get_archived_interns', async () => archive.getArchived())
+bind('search_archived_interns', async (keyword) => archive.searchArchived(keyword))
 
 // settings_
-mockReturn('change_password', null)
-mockReturn('check_has_password', false)
-mockReturn('setup_password', null)
-mockReturn('verify_login', true)  // 默认連使密码为示意设别 — 后期接 db
-mockReturn('get_operation_logs', [])
-mockReturn('get_log_count', 0)
+bind('change_password', async (newPassword, operator) => auth.changePassword(newPassword, operator || 'admin'))
+bind('check_has_password', async () => auth.checkHasPassword())
+bind('setup_password', async (password, operator) => auth.setupPassword(password))
+bind('verify_login', async (password) => auth.verifyLogin(password))
+bind('get_operation_logs', async (limit, offset) => log.getOperationLogs(limit, offset))
+bind('get_log_count', async () => log.getLogCount())
 
 // report_
-mockReturn('get_report_interns', [])
-mockReturn('get_report_rotation_all', [])
-mockReturn('get_report_departments', [])
-mockReturn('export_rotation_plan_csv', { saved: false })
-mockReturn('export_rotation_notice_pdf', { saved: false })
-mockReturn('export_department_detail_csv', { saved: false })
-mockReturn('filter_full_confirmed_intern_ids', [])
-mockReturn('load_cjk_font', null)
+bind('get_report_interns', async (status) => report.getReportInterns(status || null))
+bind('get_report_rotation_all', async () => report.getReportRotationAll())
+bind('get_report_departments', async () => report.getReportDepartments())
+bind('export_rotation_plan_csv', async (operator) => report.exportRotationPlanCSV(operator || 'admin'))
+bind('export_rotation_notice_pdf', async (year, month, operator) =>
+  report.exportRotationNoticePDF(year, month, operator || 'admin'))
+bind('export_department_detail_csv', async (operator) =>
+  report.exportDepartmentDetailCSV(operator || 'admin'))
+bind('filter_full_confirmed_intern_ids', async () => report.filterFullConfirmedInternIds())
+bind('load_cjk_font', async () => report.loadCJKFont())
 
 // devtool_
-mockReturn('open_devtools', null)
+bind('open_devtools', async () => log.devtools(mainWindow && mainWindow.webContents))
 
 // ---------------------------------------------------------------------------
 app.whenReady().then(() => {
@@ -179,6 +183,7 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => {
+  require('./lib/db.js').flush()
   app.quit()
 })
 
@@ -186,7 +191,6 @@ app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow()
 })
 
-// 项目全局错误 --此后后续期拓展
 process.on('uncaughtException', (err) => {
   console.error('[legacy-electron22] uncaughtException:', err)
 })
